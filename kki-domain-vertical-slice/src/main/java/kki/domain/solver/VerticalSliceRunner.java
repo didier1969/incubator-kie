@@ -1,8 +1,8 @@
 package kki.domain.solver;
 
+import java.util.ArrayList;
 import java.util.List;
 
-import org.optaplanner.core.api.solver.SolverJob;
 import org.optaplanner.core.api.solver.SolverManager;
 import org.optaplanner.core.config.constructionheuristic.ConstructionHeuristicPhaseConfig;
 import org.optaplanner.core.config.localsearch.LocalSearchPhaseConfig;
@@ -16,10 +16,47 @@ import kki.domain.VerticalSliceSolution;
 /**
  * REQ-KKI-006 (réécrit) : 5000 ordres, une seule variable de planification
  * (Schedule.orderSequence), SolverManager.
+ *
+ * CH et recherche locale sont mesurées comme deux expériences SÉPARÉES, pas
+ * deux phases enchaînées d'un même solve :
+ *
+ * 1. "ch_*" : la CH réelle d'OptaPlanner (ConstructionHeuristicPhaseConfig),
+ *    bornée en temps par sécurité (CH_SECONDS). Pour une liste-planning-
+ *    variable, OptaPlanner fige le type de CH sur QueuedValuePlacer +
+ *    ListChangeMoveSelector (constructionHeuristicType n'est PAS
+ *    configurable ici — DefaultConstructionHeuristicPhaseFactory rejette
+ *    tout type explicite dès qu'un ListVariableDescriptor existe, vérifié en
+ *    lisant la source). Ce placer essaie TOUTES les positions déjà remplies
+ *    pour choisir la meilleure insertion à chaque nouvel ordre : Σk ≈ N²/2
+ *    essais assign+undo, donc calculateScore_calls croît en O(N²) par
+ *    construction — confirmé empiriquement (N=200→400 : 20101→80201 appels,
+ *    soit 4× pour 2× ordres, cohérent avec 200×100 et 400×200). Ce n'est pas
+ *    un défaut du calculateur incrémental ; c'est un comportement fixe de la
+ *    CH list-variable d'OptaPlanner dans cette version. Résultat rapporté
+ *    tel quel, y compris quand CH_SECONDS coupe avant la fin (placed <
+ *    total) — ce nombre sert seulement à caractériser la CH, PAS à nourrir
+ *    la recherche locale ci-dessous.
+ *
+ * 2. "ls_*" : la recherche locale seule, sur un point de départ construit
+ *    SANS passer par la CH d'OptaPlanner — tous les ordres sont insérés dans
+ *    Schedule.orderSequence dans l'ordre de génération (placement naïf,
+ *    O(N), aucune recherche de meilleure position). Nécessaire car
+ *    DefaultLocalSearchPhase.phaseStarted appelle
+ *    assertWorkingSolutionInitialized (vérifié en lisant la source) : une
+ *    solution partiellement placée (CH coupée par CH_SECONDS) est REJETÉE
+ *    au démarrage de la phase de recherche locale — cette version
+ *    d'OptaPlanner n'a pas d'équivalent "allowsUnassignedValues" sur
+ *    {@literal @}PlanningListVariable pour les listes (vérifié : l'annotation
+ *    ne déclare que valueRangeProviderRefs). Le placement naïf garantit une
+ *    solution valide à 100% sans dépendre d'une CH qui ne termine pas à
+ *    grande échelle. Le score de départ est donc nettement pire que celui
+ *    d'une CH aboutie ; c'est sans effet sur ls_ips (débit d'appels
+ *    calculateScore, pas qualité de solution).
  */
 public final class VerticalSliceRunner {
 
     private static final int MACHINE_COUNT = 1000;
+    private static final long CH_SECONDS = 60L;
     private static final long LOCAL_SEARCH_SECONDS = 30L;
 
     private VerticalSliceRunner() {
@@ -32,35 +69,65 @@ public final class VerticalSliceRunner {
         System.out.printf("generated orders=%d operations=%d machines=%d%n",
                 unsolved.getOrderList().size(), unsolved.getOperationList().size(), unsolved.getMachineList().size());
 
-        SolverConfig solverConfig = new SolverConfig();
-        solverConfig.setSolutionClass(VerticalSliceSolution.class);
-        solverConfig.setEntityClassList(List.of(Schedule.class));
-
         ScoreDirectorFactoryConfig scoreDirectorFactoryConfig = new ScoreDirectorFactoryConfig();
         scoreDirectorFactoryConfig.setIncrementalScoreCalculatorClass(VerticalSliceIncrementalScoreCalculator.class);
-        solverConfig.setScoreDirectorFactoryConfig(scoreDirectorFactoryConfig);
 
+        runConstructionHeuristicDiagnostic(unsolved, scoreDirectorFactoryConfig);
+        runLocalSearchFromNaiveStart(unsolved, scoreDirectorFactoryConfig);
+    }
+
+    private static void runConstructionHeuristicDiagnostic(VerticalSliceSolution unsolved,
+            ScoreDirectorFactoryConfig scoreDirectorFactoryConfig) throws InterruptedException, java.util.concurrent.ExecutionException {
+        SolverConfig chConfig = new SolverConfig();
+        chConfig.setSolutionClass(VerticalSliceSolution.class);
+        chConfig.setEntityClassList(List.of(Schedule.class));
+        chConfig.setScoreDirectorFactoryConfig(scoreDirectorFactoryConfig);
+        TerminationConfig chTermination = new TerminationConfig();
+        chTermination.setSecondsSpentLimit(CH_SECONDS);
+        ConstructionHeuristicPhaseConfig chPhaseConfig = new ConstructionHeuristicPhaseConfig();
+        chPhaseConfig.setTerminationConfig(chTermination);
+        chConfig.setPhaseConfigList(List.of(chPhaseConfig));
+
+        VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.set(0);
+        long chStartNanos = System.nanoTime();
+        VerticalSliceSolution chSolved;
+        try (SolverManager<VerticalSliceSolution, Long> chManager = SolverManager.create(chConfig)) {
+            chSolved = chManager.solve(1L, unsolved).getFinalBestSolution();
+        }
+        double chSeconds = (System.nanoTime() - chStartNanos) / 1_000_000_000.0;
+        long chCalls = VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.get();
+        long chPlaced = chSolved.getScheduleList().get(0).getOrderSequence().size();
+        System.out.printf("ch_done score=%s ch_seconds=%.2f ch_calculateScore_calls=%d placed_orders=%d/%d%n",
+                chSolved.getScore(), chSeconds, chCalls, chPlaced, chSolved.getOrderList().size());
+    }
+
+    private static void runLocalSearchFromNaiveStart(VerticalSliceSolution unsolved,
+            ScoreDirectorFactoryConfig scoreDirectorFactoryConfig) throws InterruptedException, java.util.concurrent.ExecutionException {
+        Schedule naiveSchedule = new Schedule();
+        naiveSchedule.setOrderSequence(new ArrayList<>(unsolved.getOrderList()));
+        VerticalSliceSolution naiveStart = new VerticalSliceSolution(
+                unsolved.getOrderList(), unsolved.getOperationList(), unsolved.getMachineList(), List.of(naiveSchedule));
+
+        SolverConfig lsConfig = new SolverConfig();
+        lsConfig.setSolutionClass(VerticalSliceSolution.class);
+        lsConfig.setEntityClassList(List.of(Schedule.class));
+        lsConfig.setScoreDirectorFactoryConfig(scoreDirectorFactoryConfig);
         TerminationConfig localSearchTermination = new TerminationConfig();
         localSearchTermination.setSecondsSpentLimit(LOCAL_SEARCH_SECONDS);
         LocalSearchPhaseConfig localSearchPhaseConfig = new LocalSearchPhaseConfig();
         localSearchPhaseConfig.setTerminationConfig(localSearchTermination);
+        lsConfig.setPhaseConfigList(List.of(localSearchPhaseConfig));
 
-        solverConfig.setPhaseConfigList(List.of(new ConstructionHeuristicPhaseConfig(), localSearchPhaseConfig));
-
-        long startNanos = System.nanoTime();
         VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.set(0);
-
-        try (SolverManager<VerticalSliceSolution, Long> solverManager = SolverManager.create(solverConfig)) {
-            SolverJob<VerticalSliceSolution, Long> job = solverManager.solve(1L, unsolved);
-            VerticalSliceSolution solved = job.getFinalBestSolution();
-
-            double elapsedSeconds = (System.nanoTime() - startNanos) / 1_000_000_000.0;
-            long calls = VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.get();
-            double ips = calls / elapsedSeconds;
-
-            long placed = solved.getScheduleList().get(0).getOrderSequence().size();
-            System.out.printf("solved score=%s elapsed_s=%.2f calculateScore_calls=%d ips=%.1f placed_orders=%d/%d%n",
-                    solved.getScore(), elapsedSeconds, calls, ips, placed, solved.getOrderList().size());
+        long lsStartNanos = System.nanoTime();
+        VerticalSliceSolution lsSolved;
+        try (SolverManager<VerticalSliceSolution, Long> lsManager = SolverManager.create(lsConfig)) {
+            lsSolved = lsManager.solve(2L, naiveStart).getFinalBestSolution();
         }
+        double lsSeconds = (System.nanoTime() - lsStartNanos) / 1_000_000_000.0;
+        long lsCalls = VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.get();
+        double lsIps = lsCalls / lsSeconds;
+        System.out.printf("ls_done score=%s ls_seconds=%.2f ls_calculateScore_calls=%d ls_ips=%.1f%n",
+                lsSolved.getScore(), lsSeconds, lsCalls, lsIps);
     }
 }
