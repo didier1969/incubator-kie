@@ -68,6 +68,14 @@ class IncrementalPropagationDifferentialTest {
         calculator.resetWorkingSolution(solution);
         assertEquals(calculator.fullSweepScore(), calculator.calculateScore());
 
+        // REQ-KKI-008 : falsifie (avant d'adopter une PriorityQueue(xPosition,
+        // sequenceIndexInOrder) comme ordre de depilement du worklist) l'hypothese que
+        // cette cle EST un ordre topologique valide sur le graphe vivant — pas seulement
+        // au moment de attachToMachineChain. Zero inversion sur 200 mouvements
+        // relocate/swap/reversal confirme l'invariant sur le chemin reellement exerce ;
+        // une seule suffit a le refuter.
+        VerticalSliceIncrementalScoreCalculator.TOPOLOGICAL_INVERSIONS.set(0L);
+
         for (int move = 0; move < 200; move++) {
             // REQ-KKI-008 : 3 formes, dont swap (ListSwapMove même entité — jamais exercée
             // avant ce REQ) qui déclenche le chemin rapide de findDisplacedOrders le plus
@@ -121,5 +129,10 @@ class IncrementalPropagationDifferentialTest {
             assertEquals(oracle, incremental,
                     "divergence after move " + move + " (" + moveLabel + " " + lo + ".." + hi + ")");
         }
+
+        assertEquals(0L, VerticalSliceIncrementalScoreCalculator.TOPOLOGICAL_INVERSIONS.get(),
+                "(xPosition, sequenceIndexInOrder) n'est pas un ordre topologique valide sur le graphe vivant "
+                        + "après ces 200 mouvements — une PriorityQueue sur cette clé serait une heuristique, "
+                        + "pas une garantie de finalisation en un seul dépilement (REQ-KKI-008)");
     }
 }

@@ -119,6 +119,18 @@ public class VerticalSliceIncrementalScoreCalculator
      */
     public static final AtomicLong PROPAGATE_POPS = new AtomicLong(0L);
 
+    /**
+     * REQ-KKI-008, vérification AVANT d'adopter une PriorityQueue(xPosition,
+     * sequenceIndexInOrder) comme ordre de dépilement : compte les paires
+     * (op, nextOnMachine[op]) où xPosition[successeur] &lt; xPosition[op] —
+     * une INVERSION signifierait que (xPosition, sequenceIndexInOrder) n'est
+     * PAS un ordre topologique valide sur le graphe VIVANT (detachFromMachineChain
+     * épisse pred→succ sans revérifier leurs positions), auquel cas une
+     * PriorityQueue sur cette clé resterait une heuristique, pas une garantie
+     * de finalisation en un seul dépilement par nœud.
+     */
+    public static final AtomicLong TOPOLOGICAL_INVERSIONS = new AtomicLong(0L);
+
     private VerticalSliceSolution solution;
     private Schedule schedule;
     private long scheduleOrigin;
@@ -410,6 +422,12 @@ public class VerticalSliceIncrementalScoreCalculator
             Operation op = worklist.poll();
             PROPAGATE_POPS.incrementAndGet();
             queued[idx(op)] = false;
+
+            Operation machineSucc = nextOnMachine[idx(op)];
+            if (machineSucc != null
+                    && xPosition[(int) machineSucc.getOrder().getId()] < xPosition[(int) op.getOrder().getId()]) {
+                TOPOLOGICAL_INVERSIONS.incrementAndGet();
+            }
 
             Order order = op.getOrder();
             List<Operation> ops = order.getOperations();
