@@ -146,6 +146,35 @@ public class VerticalSliceIncrementalScoreCalculator
      */
     public static final AtomicLong TOPOLOGICAL_INVERSIONS = new AtomicLong(0L);
 
+    /**
+     * REQ-KKI-006, diagnostic V_dirty : incrémenté UNIQUEMENT quand un
+     * dépilement produit un changement réel de (opStart, opEnd) — jamais sur
+     * le cas no-op (continue de propagate()). Discriminant : si
+     * PROPAGATE_DIRTY_POPS ≈ PROPAGATE_POPS, la propagation ne gaspille pas
+     * de dépilements (déjà quasi-optimale) ; si très inférieur, il reste un
+     * levier algorithmique dans propagate() lui-même, distinct du levier
+     * d'ordre de dépilement déjà exploité par REQ-KKI-008.
+     */
+    public static final AtomicLong PROPAGATE_DIRTY_POPS = new AtomicLong(0L);
+
+    /**
+     * REQ-KKI-006, diagnostic span : somme de (toIndex - fromIndex) sur
+     * chaque appel afterListVariableChanged — mesure l'étendue réelle des
+     * mouvements essayés par la recherche locale, pas la propagation
+     * elle-même. Discriminant : un span moyen grand à N=3000 pointerait vers
+     * un move selector borné/local côté configuration OptaPlanner comme
+     * levier — un levier absent des pistes REQ-KKI-006/008 déjà explorées.
+     */
+    public static final AtomicLong MOVE_SPAN_TOTAL = new AtomicLong(0L);
+
+    /**
+     * REQ-KKI-006, diagnostic span : nombre d'appels afterListVariableChanged
+     * — dénominateur propre pour MOVE_SPAN_TOTAL (mean_span_per_move), sert
+     * aussi de vérification croisée contre CALCULATE_SCORE_CALLS (do/undo
+     * de mouvement rejeté n'appelle pas forcément calculateScore()).
+     */
+    public static final AtomicLong PROPAGATION_CALLS = new AtomicLong(0L);
+
     private VerticalSliceSolution solution;
     private Schedule schedule;
     private long scheduleOrigin;
@@ -474,6 +503,7 @@ public class VerticalSliceIncrementalScoreCalculator
             if (newStart == opStart[idx(op)] && newEnd == opEnd[idx(op)]) {
                 continue;
             }
+            PROPAGATE_DIRTY_POPS.incrementAndGet();
             opStart[idx(op)] = newStart;
             opEnd[idx(op)] = newEnd;
 
@@ -514,6 +544,8 @@ public class VerticalSliceIncrementalScoreCalculator
     @Override
     public void afterListVariableChanged(Object entity, String variableName, int fromIndex, int toIndex) {
         long propagationStartNanos = System.nanoTime();
+        PROPAGATION_CALLS.incrementAndGet();
+        MOVE_SPAN_TOTAL.addAndGet(toIndex - fromIndex);
         List<Order> sequence = schedule.getOrderSequence();
         boolean sameSize = changedRangeBefore.size() == toIndex - fromIndex;
         if (sameSize) {

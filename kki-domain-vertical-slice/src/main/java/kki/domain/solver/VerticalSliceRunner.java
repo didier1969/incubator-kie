@@ -65,6 +65,10 @@ public final class VerticalSliceRunner {
     public static void main(String[] args) throws InterruptedException, java.util.concurrent.ExecutionException {
         // arg[0] = nombre d'ordres (diagnostic d'echelle, REQ-KKI-006) ; defaut 5000.
         int orderCount = args.length > 0 ? Integer.parseInt(args[0]) : 5000;
+        // arg[1] = budget recherche locale en secondes pour l'appel "naive" UNIQUEMENT
+        // (REQ-KKI-007, diagnostic sensibilite au budget temps) ; defaut LOCAL_SEARCH_SECONDS,
+        // comportement inchange si absent.
+        long naiveLsSeconds = args.length > 1 ? Long.parseLong(args[1]) : LOCAL_SEARCH_SECONDS;
         VerticalSliceSolution unsolved = SyntheticDataGenerator.generate(orderCount, MACHINE_COUNT, 42L);
         System.out.printf("generated orders=%d operations=%d machines=%d%n",
                 unsolved.getOrderList().size(), unsolved.getOperationList().size(), unsolved.getMachineList().size());
@@ -78,7 +82,7 @@ public final class VerticalSliceRunner {
         naiveSchedule.setOrderSequence(new ArrayList<>(unsolved.getOrderList()));
         VerticalSliceSolution naiveStart = new VerticalSliceSolution(
                 unsolved.getOrderList(), unsolved.getOperationList(), unsolved.getMachineList(), List.of(naiveSchedule));
-        runLocalSearch(naiveStart, "naive", scoreDirectorFactoryConfig);
+        runLocalSearch(naiveStart, "naive", scoreDirectorFactoryConfig, naiveLsSeconds);
 
         // REQ-KKI-008 : pops_per_call sur un départ CH réel (structuré) vs le départ
         // naïf ci-dessus (ordre de génération, dépendances non structurées) — décide si
@@ -87,7 +91,7 @@ public final class VerticalSliceRunner {
         // tourne que si CH a placé tout le monde (sinon assertWorkingSolutionInitialized
         // rejette, cf. commentaire de classe).
         if (chSolved.getScheduleList().get(0).getOrderSequence().size() == chSolved.getOrderList().size()) {
-            runLocalSearch(chSolved, "ch_start", scoreDirectorFactoryConfig);
+            runLocalSearch(chSolved, "ch_start", scoreDirectorFactoryConfig, LOCAL_SEARCH_SECONDS);
         }
     }
 
@@ -118,13 +122,14 @@ public final class VerticalSliceRunner {
     }
 
     private static void runLocalSearch(VerticalSliceSolution start, String label,
-            ScoreDirectorFactoryConfig scoreDirectorFactoryConfig) throws InterruptedException, java.util.concurrent.ExecutionException {
+            ScoreDirectorFactoryConfig scoreDirectorFactoryConfig, long lsSeconds)
+            throws InterruptedException, java.util.concurrent.ExecutionException {
         SolverConfig lsConfig = new SolverConfig();
         lsConfig.setSolutionClass(VerticalSliceSolution.class);
         lsConfig.setEntityClassList(List.of(Schedule.class));
         lsConfig.setScoreDirectorFactoryConfig(scoreDirectorFactoryConfig);
         TerminationConfig localSearchTermination = new TerminationConfig();
-        localSearchTermination.setSecondsSpentLimit(LOCAL_SEARCH_SECONDS);
+        localSearchTermination.setSecondsSpentLimit(lsSeconds);
         LocalSearchPhaseConfig localSearchPhaseConfig = new LocalSearchPhaseConfig();
         localSearchPhaseConfig.setTerminationConfig(localSearchTermination);
         lsConfig.setPhaseConfigList(List.of(localSearchPhaseConfig));
@@ -134,23 +139,33 @@ public final class VerticalSliceRunner {
         VerticalSliceIncrementalScoreCalculator.PROPAGATION_NANOS.set(0L);
         VerticalSliceIncrementalScoreCalculator.PROPAGATE_POPS.set(0L);
         VerticalSliceIncrementalScoreCalculator.TOPOLOGICAL_INVERSIONS.set(0L);
+        VerticalSliceIncrementalScoreCalculator.PROPAGATE_DIRTY_POPS.set(0L);
+        VerticalSliceIncrementalScoreCalculator.MOVE_SPAN_TOTAL.set(0L);
+        VerticalSliceIncrementalScoreCalculator.PROPAGATION_CALLS.set(0L);
         long lsStartNanos = System.nanoTime();
         VerticalSliceSolution lsSolved;
         try (SolverManager<VerticalSliceSolution, Long> lsManager = SolverManager.create(lsConfig)) {
             lsSolved = lsManager.solve(2L, start).getFinalBestSolution();
         }
-        double lsSeconds = (System.nanoTime() - lsStartNanos) / 1_000_000_000.0;
+        double lsSecondsElapsed = (System.nanoTime() - lsStartNanos) / 1_000_000_000.0;
         long lsCalls = VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.get();
-        double lsIps = lsCalls / lsSeconds;
+        double lsIps = lsCalls / lsSecondsElapsed;
         long firstCallNanos = VerticalSliceIncrementalScoreCalculator.FIRST_CALL_NANOS.get();
         double setupSeconds = firstCallNanos == 0L ? -1.0 : (firstCallNanos - lsStartNanos) / 1_000_000_000.0;
         double propagationSeconds = VerticalSliceIncrementalScoreCalculator.PROPAGATION_NANOS.get() / 1_000_000_000.0;
         long propagatePops = VerticalSliceIncrementalScoreCalculator.PROPAGATE_POPS.get();
         double popsPerCall = lsCalls == 0 ? -1.0 : (double) propagatePops / lsCalls;
         long inversions = VerticalSliceIncrementalScoreCalculator.TOPOLOGICAL_INVERSIONS.get();
+        long dirtyPops = VerticalSliceIncrementalScoreCalculator.PROPAGATE_DIRTY_POPS.get();
+        double dirtyPerCall = lsCalls == 0 ? -1.0 : (double) dirtyPops / lsCalls;
+        double noopPopPct = propagatePops == 0 ? -1.0 : 100.0 * (1.0 - (double) dirtyPops / propagatePops);
+        long propagationCalls = VerticalSliceIncrementalScoreCalculator.PROPAGATION_CALLS.get();
+        long moveSpanTotal = VerticalSliceIncrementalScoreCalculator.MOVE_SPAN_TOTAL.get();
+        double meanSpanPerMove = propagationCalls == 0 ? -1.0 : (double) moveSpanTotal / propagationCalls;
         System.out.printf(
-                "ls_done[%s] score=%s ls_seconds=%.2f ls_calculateScore_calls=%d ls_ips=%.1f setup_seconds_before_first_call=%.2f propagation_seconds=%.2f propagation_pct=%.1f propagate_pops=%d pops_per_call=%.1f topological_inversions=%d%n",
-                label, lsSolved.getScore(), lsSeconds, lsCalls, lsIps, setupSeconds, propagationSeconds,
-                100.0 * propagationSeconds / lsSeconds, propagatePops, popsPerCall, inversions);
+                "ls_done[%s] score=%s ls_seconds=%.2f ls_calculateScore_calls=%d ls_ips=%.1f setup_seconds_before_first_call=%.2f propagation_seconds=%.2f propagation_pct=%.1f propagate_pops=%d pops_per_call=%.1f topological_inversions=%d dirty_pops=%d dirty_per_call=%.1f noop_pop_pct=%.1f propagation_calls=%d mean_span_per_move=%.1f%n",
+                label, lsSolved.getScore(), lsSecondsElapsed, lsCalls, lsIps, setupSeconds, propagationSeconds,
+                100.0 * propagationSeconds / lsSecondsElapsed, propagatePops, popsPerCall, inversions,
+                dirtyPops, dirtyPerCall, noopPopPct, propagationCalls, meanSpanPerMove);
     }
 }
