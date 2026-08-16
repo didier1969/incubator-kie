@@ -1,11 +1,12 @@
 package kki.domain.solver;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.optaplanner.core.api.score.buildin.hardsoftlong.HardSoftLongScore;
@@ -71,6 +72,20 @@ import kki.domain.VerticalSliceSolution;
  * findDisplacedOrders : ensemble minimal par comparaison position-à-
  * position, repli sûr sur tout le span pour toute forme non reconnue
  * (reversal, sous-liste). PROPAGATION_NANOS mesure le résultat en continu.
+ * Mesuré ensuite (toujours REQ-KKI-008) : ce narrowing avait un effet NUL
+ * sur propagation_pct/ls_ips — le vrai coût était le worklist lui-même
+ * (ArrayDeque FIFO non trié topologiquement sur un DAG, ~70 relaxations
+ * répétées par opération à N=5000, prouvé via PROPAGATE_POPS). Remplacé par
+ * une PriorityQueue triée sur (xPosition, sequenceIndexInOrder) — voir le
+ * commentaire du champ worklist pour la preuve + la vérification empirique
+ * (TOPOLOGICAL_INVERSIONS, 0 sur ~350M+ arêtes). Résultat mesuré : à
+ * N=5000, pops_per_call 1650463.8→1980.7 (~833×) ; à N=3000 (échelle
+ * PIL-KKI-003), ls_ips 35.6→1354.9 (~38×, contre la cible 2000 IPS — pas
+ * encore atteinte, mais l'écart passe de 56× à 1.48×). À N=200, régression
+ * mineure de ls_ips
+ * malgré moins de pops (surcoût constant O(log n) du tas face à un
+ * ArrayDeque O(1), quand il n'y avait déjà presque rien à éliminer) — sans
+ * conséquence, très au-dessus de la cible à cette échelle de toute façon.
  * Les ids Order/Operation DOIVENT être denses 0..count-1 (invariant de
  * SyntheticDataGenerator) — indexation directe par tableau, pas de
  * Map&lt;Long,?&gt; sur le chemin chaud (c'est tout l'objet de PIL-KKI-003).
@@ -145,7 +160,21 @@ public class VerticalSliceIncrementalScoreCalculator
     private int[] xPosition;
     private List<Operation>[] operationsByMachine;
 
-    private final ArrayDeque<Operation> worklist = new ArrayDeque<>();
+    // REQ-KKI-008 : PriorityQueue triée sur (xPosition[ordre], sequenceIndexInOrder) —
+    // ordre quasi-topologique du DAG (order-chain : même xPosition, sequenceIndexInOrder
+    // croissant ; machine-chain : xPosition strictement croissant par construction de
+    // findMachineSuccessor). Prouvé ET vérifié empiriquement (TOPOLOGICAL_INVERSIONS,
+    // 0 sur ~350M+ arêtes à 3 échelles) que cette clé est un ordre topologique valide sur
+    // le graphe VIVANT, pas seulement au moment de l'attache — donc chaque nœud est
+    // finalisé dès son PREMIER dépilement (les prédécesseurs, topologiquement plus
+    // petits, ont toujours déjà convergé). Convergence indépendante de l'ordre de
+    // dépilement (Bellman-Ford sur DAG, cf. commentaire de classe) : les 4 tests
+    // différentiels existants restent la vérification correcte sans modification.
+    // RÉALLOUÉE dans resetWorkingSolution (pas au champ) : le comparateur capture `this`
+    // et relit xPosition dynamiquement, mais la file DOIT être vide au moment où
+    // xPosition change de tableau — allouer après l'assignation, jamais avant, évite
+    // tout doute sur ce point plutôt que de s'y fier.
+    private PriorityQueue<Operation> worklist;
     private List<Order> changedRangeBefore;
 
     @Override
@@ -168,7 +197,11 @@ public class VerticalSliceIncrementalScoreCalculator
         // appartiennent à des ordres pas encore placés, faussement matchés en position 0).
         Arrays.fill(xPosition, -1);
         scheduleOrigin = SyntheticDataGenerator.BASE_EPOCH;
-        worklist.clear();
+        // Allouée ICI, après l'assignation de xPosition ci-dessus — voir le commentaire
+        // du champ worklist pour pourquoi ce n'est pas un détail interchangeable.
+        worklist = new PriorityQueue<>(
+                Comparator.<Operation>comparingInt(op -> xPosition[(int) op.getOrder().getId()])
+                        .thenComparingInt(Operation::getSequenceIndexInOrder));
         buildOperationsByMachine(workingSolution, machineCount);
         fullRebuild();
     }
