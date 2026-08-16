@@ -2,6 +2,7 @@ package kki.domain.solver;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +26,15 @@ import kki.domain.VerticalSliceSolution;
  * schedule.getOrderSequence() de part et d'autre de la zone (la liste est
  * déjà mutée au moment des hooks after*), puis propagation par liste de
  * nœuds sales jusqu'à convergence.
+ * Recherche de voisin machine : operationsByMachine (groupement STATIQUE,
+ * construit une fois — l'affectation machine est un fait fixe dans cette
+ * tranche, CPT-KKI-008 différé) + xPosition (position X courante par ordre,
+ * tenue à jour sur chaque appel). Trouver le prédécesseur/successeur machine
+ * d'une opération devient un scan de operationsByMachine[machineId] (taille
+ * ~opCount/machineCount, ex. ~22 à N=5000) au lieu d'un parcours de la
+ * séquence globale (taille N) — mesuré : marcher la séquence globale était
+ * le vrai goulot (walk O(N) par attache, pas la structure worklist/delta
+ * elle-même), cf. corps REQ-KKI-006.
  * Toute la logique passe par before/afterListVariableChanged UNIQUEMENT —
  * vérifié dans le code source d'OptaPlanner (ListAssignMove, ListChangeMove,
  * ListSwapMove, ListUnassignMove, SubListChangeMove) : les 5 encadrent
@@ -78,6 +88,8 @@ public class VerticalSliceIncrementalScoreCalculator
     private long[] orderCost;
     private boolean[] queued;
     private long softScoreTotal;
+    private int[] xPosition;
+    private List<Operation>[] operationsByMachine;
 
     private final ArrayDeque<Operation> worklist = new ArrayDeque<>();
     private List<Order> changedRangeBefore;
@@ -88,21 +100,43 @@ public class VerticalSliceIncrementalScoreCalculator
         this.schedule = workingSolution.getScheduleList().get(0);
         int opCount = workingSolution.getOperationList().size();
         int orderCount = workingSolution.getOrderList().size();
+        int machineCount = workingSolution.getMachineList().size();
         opStart = new long[opCount];
         opEnd = new long[opCount];
         prevOnMachine = new Operation[opCount];
         nextOnMachine = new Operation[opCount];
         orderCost = new long[orderCount];
         queued = new boolean[opCount];
+        xPosition = new int[orderCount];
+        // -1 = "pas encore placé dans orderSequence" (défaut 0 du tableau int[] serait
+        // indiscernable d'une vraie position 0 — bug réel trouvé empiriquement : en
+        // construction heuristique, la plupart des candidats de operationsByMachine[m]
+        // appartiennent à des ordres pas encore placés, faussement matchés en position 0).
+        Arrays.fill(xPosition, -1);
         scheduleOrigin = SyntheticDataGenerator.BASE_EPOCH;
         worklist.clear();
+        buildOperationsByMachine(workingSolution, machineCount);
         fullRebuild();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void buildOperationsByMachine(VerticalSliceSolution workingSolution, int machineCount) {
+        operationsByMachine = new List[machineCount];
+        for (int m = 0; m < machineCount; m++) {
+            operationsByMachine[m] = new ArrayList<>();
+        }
+        for (Operation op : workingSolution.getOperationList()) {
+            operationsByMachine[(int) op.getMachineId()].add(op);
+        }
     }
 
     private void fullRebuild() {
         Map<Long, Operation> machineTail = new HashMap<>();
         softScoreTotal = 0L;
-        for (Order order : schedule.getOrderSequence()) {
+        List<Order> sequence = schedule.getOrderSequence();
+        for (int orderIndex = 0; orderIndex < sequence.size(); orderIndex++) {
+            Order order = sequence.get(orderIndex);
+            xPosition[(int) order.getId()] = orderIndex;
             long previousEndInOrder = scheduleOrigin;
             long lastEnd = scheduleOrigin;
             for (Operation op : order.getOperations()) {
@@ -167,30 +201,42 @@ public class VerticalSliceIncrementalScoreCalculator
         }
     }
 
-    private Operation findMachinePredecessor(int fromIndexInclusive, long machineId) {
-        List<Order> sequence = schedule.getOrderSequence();
-        for (int i = fromIndexInclusive; i >= 0; i--) {
-            List<Operation> ops = sequence.get(i).getOperations();
-            for (int j = ops.size() - 1; j >= 0; j--) {
-                if (ops.get(j).getMachineId() == machineId) {
-                    return ops.get(j);
-                }
+    private Operation findMachinePredecessor(int strictlyBeforeIndex, long machineId) {
+        Operation best = null;
+        int bestPos = -1;
+        int bestSeq = -1;
+        for (Operation candidate : operationsByMachine[(int) machineId]) {
+            int pos = xPosition[(int) candidate.getOrder().getId()];
+            if (pos == -1 || pos > strictlyBeforeIndex) {
+                continue;
+            }
+            int seq = candidate.getSequenceIndexInOrder();
+            if (pos > bestPos || (pos == bestPos && seq > bestSeq)) {
+                best = candidate;
+                bestPos = pos;
+                bestSeq = seq;
             }
         }
-        return null;
+        return best;
     }
 
-    private Operation findMachineSuccessor(int fromIndexInclusive, long machineId) {
-        List<Order> sequence = schedule.getOrderSequence();
-        int size = sequence.size();
-        for (int i = fromIndexInclusive; i < size; i++) {
-            for (Operation candidate : sequence.get(i).getOperations()) {
-                if (candidate.getMachineId() == machineId) {
-                    return candidate;
-                }
+    private Operation findMachineSuccessor(int strictlyAfterIndex, long machineId) {
+        Operation best = null;
+        int bestPos = Integer.MAX_VALUE;
+        int bestSeq = Integer.MAX_VALUE;
+        for (Operation candidate : operationsByMachine[(int) machineId]) {
+            int pos = xPosition[(int) candidate.getOrder().getId()];
+            if (pos == -1 || pos < strictlyAfterIndex) {
+                continue;
+            }
+            int seq = candidate.getSequenceIndexInOrder();
+            if (pos < bestPos || (pos == bestPos && seq < bestSeq)) {
+                best = candidate;
+                bestPos = pos;
+                bestSeq = seq;
             }
         }
-        return null;
+        return best;
     }
 
     private void detachFromMachineChain(Operation op) {
@@ -306,6 +352,20 @@ public class VerticalSliceIncrementalScoreCalculator
             }
         }
         List<Order> sequence = schedule.getOrderSequence();
+        if (changedRangeBefore.size() != toIndex - fromIndex) {
+            // Net insert/unassign (ListAssignMove/ListUnassignMove) : the index shift extends
+            // past [fromIndex,toIndex) to the rest of the list, unlike same-size relocate/swap/
+            // reversal moves where the span fully bounds it. Only construction heuristic hits
+            // this branch here (every Order is mandatory, never unassigned again once placed).
+            // Positions before fromIndex provably never shift — resync from fromIndex only, not 0.
+            for (int i = fromIndex; i < sequence.size(); i++) {
+                xPosition[(int) sequence.get(i).getId()] = i;
+            }
+        } else {
+            for (int i = fromIndex; i < toIndex; i++) {
+                xPosition[(int) sequence.get(i).getId()] = i;
+            }
+        }
         for (int i = fromIndex; i < toIndex; i++) {
             for (Operation op : sequence.get(i).getOperations()) {
                 attachToMachineChain(op, i);

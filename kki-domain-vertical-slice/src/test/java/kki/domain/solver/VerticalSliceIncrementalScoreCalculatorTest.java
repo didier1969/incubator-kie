@@ -36,8 +36,8 @@ class VerticalSliceIncrementalScoreCalculatorTest {
 
     @Test
     void sweepsBothMachineAndOrderPrecedenceInOnePass() {
-        Machine m1 = new Machine(1, 100);
-        Machine m2 = new Machine(2, 100);
+        Machine m1 = new Machine(0, 100);
+        Machine m2 = new Machine(1, 100);
 
         long origin = SyntheticDataGenerator.BASE_EPOCH;
         Order orderA = new Order(0, 100, 2, origin + 14_400L);

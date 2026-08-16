@@ -29,8 +29,8 @@ class GrowthFromEmptyDifferentialTest {
     @Test
     void incrementalScoreMatchesFullSweepWhileGrowingFromEmpty() {
         Random random = new Random(11L);
-        int orderCount = 20;
-        int machineCount = 8;
+        int orderCount = 150;
+        int machineCount = 30;
 
         List<Machine> machines = new ArrayList<>();
         for (long m = 0; m < machineCount; m++) {
