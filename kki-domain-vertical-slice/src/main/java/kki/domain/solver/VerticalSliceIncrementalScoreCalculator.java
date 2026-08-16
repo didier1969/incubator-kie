@@ -175,6 +175,16 @@ public class VerticalSliceIncrementalScoreCalculator
      */
     public static final AtomicLong PROPAGATION_CALLS = new AtomicLong(0L);
 
+    /**
+     * REQ-KKI-007 piste (d) : reference LIVE vers xPosition, exposee pour
+     * OrderPositionNearbyDistanceMeter (nearby selection cote
+     * LocalSearchPhaseConfig, VerticalSliceRunner). xPosition n'est jamais
+     * REASSIGNE hors resetWorkingSolution (seulement mute en place ensuite),
+     * donc cette reference reste a jour sans resynchronisation explicite.
+     * Couplage assume, diagnostic de piste (d), revertible.
+     */
+    public static volatile int[] LIVE_X_POSITION;
+
     private VerticalSliceSolution solution;
     private Schedule schedule;
     private long scheduleOrigin;
@@ -231,6 +241,7 @@ public class VerticalSliceIncrementalScoreCalculator
         worklist = new PriorityQueue<>(
                 Comparator.<Operation>comparingInt(op -> xPosition[(int) op.getOrder().getId()])
                         .thenComparingInt(Operation::getSequenceIndexInOrder));
+        LIVE_X_POSITION = xPosition;
         buildOperationsByMachine(workingSolution, machineCount);
         fullRebuild();
     }

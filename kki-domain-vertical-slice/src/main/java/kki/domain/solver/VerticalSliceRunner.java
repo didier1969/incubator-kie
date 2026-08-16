@@ -5,6 +5,14 @@ import java.util.List;
 
 import org.optaplanner.core.api.solver.SolverManager;
 import org.optaplanner.core.config.constructionheuristic.ConstructionHeuristicPhaseConfig;
+import org.optaplanner.core.config.heuristic.selector.common.nearby.NearbySelectionConfig;
+import org.optaplanner.core.config.heuristic.selector.common.nearby.NearbySelectionDistributionType;
+import org.optaplanner.core.config.heuristic.selector.list.DestinationSelectorConfig;
+import org.optaplanner.core.config.heuristic.selector.move.MoveSelectorConfig;
+import org.optaplanner.core.config.heuristic.selector.move.composite.UnionMoveSelectorConfig;
+import org.optaplanner.core.config.heuristic.selector.move.generic.list.ListChangeMoveSelectorConfig;
+import org.optaplanner.core.config.heuristic.selector.move.generic.list.ListSwapMoveSelectorConfig;
+import org.optaplanner.core.config.heuristic.selector.value.ValueSelectorConfig;
 import org.optaplanner.core.config.localsearch.LocalSearchPhaseConfig;
 import org.optaplanner.core.config.score.director.ScoreDirectorFactoryConfig;
 import org.optaplanner.core.config.solver.SolverConfig;
@@ -82,7 +90,15 @@ public final class VerticalSliceRunner {
         naiveSchedule.setOrderSequence(new ArrayList<>(unsolved.getOrderList()));
         VerticalSliceSolution naiveStart = new VerticalSliceSolution(
                 unsolved.getOrderList(), unsolved.getOperationList(), unsolved.getMachineList(), List.of(naiveSchedule));
-        runLocalSearch(naiveStart, "naive", scoreDirectorFactoryConfig, naiveLsSeconds);
+        runLocalSearch(naiveStart, "naive", scoreDirectorFactoryConfig, naiveLsSeconds, false);
+
+        // REQ-KKI-007 piste (d) : meme depart naif, meme budget, SEULE la selection de
+        // mouvement change (nearby au lieu d'uniforme sur toute la sequence) --
+        // comparable directement a "naive" ci-dessus. Signal d'acceptation AVANT tout :
+        // mean_span_per_move doit chuter nettement (sinon la config est inerte, pas
+        // "sans effet" -- verifier avant d'interpreter ls_ips/score, cf. corps
+        // REQ-KKI-006/007).
+        runLocalSearch(naiveStart, "naive_nearby", scoreDirectorFactoryConfig, naiveLsSeconds, true);
 
         // REQ-KKI-008 : pops_per_call sur un départ CH réel (structuré) vs le départ
         // naïf ci-dessus (ordre de génération, dépendances non structurées) — décide si
@@ -91,7 +107,7 @@ public final class VerticalSliceRunner {
         // tourne que si CH a placé tout le monde (sinon assertWorkingSolutionInitialized
         // rejette, cf. commentaire de classe).
         if (chSolved.getScheduleList().get(0).getOrderSequence().size() == chSolved.getOrderList().size()) {
-            runLocalSearch(chSolved, "ch_start", scoreDirectorFactoryConfig, LOCAL_SEARCH_SECONDS);
+            runLocalSearch(chSolved, "ch_start", scoreDirectorFactoryConfig, LOCAL_SEARCH_SECONDS, false);
         }
     }
 
@@ -122,7 +138,7 @@ public final class VerticalSliceRunner {
     }
 
     private static void runLocalSearch(VerticalSliceSolution start, String label,
-            ScoreDirectorFactoryConfig scoreDirectorFactoryConfig, long lsSeconds)
+            ScoreDirectorFactoryConfig scoreDirectorFactoryConfig, long lsSeconds, boolean nearbySelection)
             throws InterruptedException, java.util.concurrent.ExecutionException {
         SolverConfig lsConfig = new SolverConfig();
         lsConfig.setSolutionClass(VerticalSliceSolution.class);
@@ -132,6 +148,9 @@ public final class VerticalSliceRunner {
         localSearchTermination.setSecondsSpentLimit(lsSeconds);
         LocalSearchPhaseConfig localSearchPhaseConfig = new LocalSearchPhaseConfig();
         localSearchPhaseConfig.setTerminationConfig(localSearchTermination);
+        if (nearbySelection) {
+            localSearchPhaseConfig.setMoveSelectorConfig(buildNearbyMoveSelectorConfig());
+        }
         lsConfig.setPhaseConfigList(List.of(localSearchPhaseConfig));
 
         VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.set(0);
@@ -167,5 +186,55 @@ public final class VerticalSliceRunner {
                 label, lsSolved.getScore(), lsSecondsElapsed, lsCalls, lsIps, setupSeconds, propagationSeconds,
                 100.0 * propagationSeconds / lsSecondsElapsed, propagatePops, popsPerCall, inversions,
                 dirtyPops, dirtyPerCall, noopPopPct, propagationCalls, meanSpanPerMove);
+    }
+
+    /**
+     * REQ-KKI-007 piste (d) : UnionMoveSelectorConfig(ListChange, ListSwap), tous
+     * deux avec une destination/valeur secondaire choisie par NearbySelectionConfig
+     * (PARABOLIC_DISTRIBUTION, taille=50 -- valeur de depart NON balayee, premiere
+     * mesure) au lieu de la selection uniforme sur toute la sequence par defaut
+     * d'OptaPlanner (mesure : mean_span_per_move ~= N/3 sans ceci, cf. corps
+     * REQ-KKI-006/007). OrderPositionNearbyDistanceMeter mesure la distance via
+     * xPosition[] LIVE (pas Order.getId(), qui ne suit l'ordre de sequence qu'au
+     * tout premier instant naif).
+     */
+    private static MoveSelectorConfig buildNearbyMoveSelectorConfig() {
+        // mimicSelectorRef obligatoire (verifie empiriquement, IllegalArgumentException
+        // sans ceci : "A nearby's original value should always be the same as a value
+        // selected earlier in the move") -- l'origine du nearby DOIT pointer par id vers
+        // le value selector primaire du meme mouvement, pas un ValueSelectorConfig vide.
+        ValueSelectorConfig changeValueSelectorConfig = new ValueSelectorConfig();
+        changeValueSelectorConfig.setId("changeValue");
+        ListChangeMoveSelectorConfig changeConfig = new ListChangeMoveSelectorConfig();
+        changeConfig.setValueSelectorConfig(changeValueSelectorConfig);
+        DestinationSelectorConfig destinationSelectorConfig = new DestinationSelectorConfig();
+        destinationSelectorConfig.setNearbySelectionConfig(buildNearbySelectionConfig("changeValue"));
+        changeConfig.setDestinationSelectorConfig(destinationSelectorConfig);
+
+        ValueSelectorConfig swapValueSelectorConfig = new ValueSelectorConfig();
+        swapValueSelectorConfig.setId("swapValue");
+        ListSwapMoveSelectorConfig swapConfig = new ListSwapMoveSelectorConfig();
+        swapConfig.setValueSelectorConfig(swapValueSelectorConfig);
+        ValueSelectorConfig secondaryValueSelectorConfig = new ValueSelectorConfig();
+        secondaryValueSelectorConfig.setNearbySelectionConfig(buildNearbySelectionConfig("swapValue"));
+        swapConfig.setSecondaryValueSelectorConfig(secondaryValueSelectorConfig);
+
+        List<MoveSelectorConfig> moveSelectorConfigList = new ArrayList<>();
+        moveSelectorConfigList.add(changeConfig);
+        moveSelectorConfigList.add(swapConfig);
+        UnionMoveSelectorConfig unionConfig = new UnionMoveSelectorConfig();
+        unionConfig.setMoveSelectorList(moveSelectorConfigList);
+        return unionConfig;
+    }
+
+    private static NearbySelectionConfig buildNearbySelectionConfig(String mimicSelectorRef) {
+        ValueSelectorConfig originValueSelectorConfig = new ValueSelectorConfig();
+        originValueSelectorConfig.setMimicSelectorRef(mimicSelectorRef);
+        NearbySelectionConfig nearbySelectionConfig = new NearbySelectionConfig();
+        nearbySelectionConfig.setOriginValueSelectorConfig(originValueSelectorConfig);
+        nearbySelectionConfig.setNearbyDistanceMeterClass(OrderPositionNearbyDistanceMeter.class);
+        nearbySelectionConfig.setNearbySelectionDistributionType(NearbySelectionDistributionType.PARABOLIC_DISTRIBUTION);
+        nearbySelectionConfig.setParabolicDistributionSizeMaximum(50);
+        return nearbySelectionConfig;
     }
 }
