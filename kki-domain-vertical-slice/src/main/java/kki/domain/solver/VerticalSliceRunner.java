@@ -119,6 +119,8 @@ public final class VerticalSliceRunner {
         lsConfig.setPhaseConfigList(List.of(localSearchPhaseConfig));
 
         VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.set(0);
+        VerticalSliceIncrementalScoreCalculator.FIRST_CALL_NANOS.set(0L);
+        VerticalSliceIncrementalScoreCalculator.PROPAGATION_NANOS.set(0L);
         long lsStartNanos = System.nanoTime();
         VerticalSliceSolution lsSolved;
         try (SolverManager<VerticalSliceSolution, Long> lsManager = SolverManager.create(lsConfig)) {
@@ -127,7 +129,12 @@ public final class VerticalSliceRunner {
         double lsSeconds = (System.nanoTime() - lsStartNanos) / 1_000_000_000.0;
         long lsCalls = VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.get();
         double lsIps = lsCalls / lsSeconds;
-        System.out.printf("ls_done score=%s ls_seconds=%.2f ls_calculateScore_calls=%d ls_ips=%.1f%n",
-                lsSolved.getScore(), lsSeconds, lsCalls, lsIps);
+        long firstCallNanos = VerticalSliceIncrementalScoreCalculator.FIRST_CALL_NANOS.get();
+        double setupSeconds = firstCallNanos == 0L ? -1.0 : (firstCallNanos - lsStartNanos) / 1_000_000_000.0;
+        double propagationSeconds = VerticalSliceIncrementalScoreCalculator.PROPAGATION_NANOS.get() / 1_000_000_000.0;
+        System.out.printf(
+                "ls_done score=%s ls_seconds=%.2f ls_calculateScore_calls=%d ls_ips=%.1f setup_seconds_before_first_call=%.2f propagation_seconds=%.2f propagation_pct=%.1f%n",
+                lsSolved.getScore(), lsSeconds, lsCalls, lsIps, setupSeconds, propagationSeconds,
+                100.0 * propagationSeconds / lsSeconds);
     }
 }
