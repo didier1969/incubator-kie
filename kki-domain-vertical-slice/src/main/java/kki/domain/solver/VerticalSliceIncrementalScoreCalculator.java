@@ -1,5 +1,7 @@
 package kki.domain.solver;
 
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -15,16 +17,47 @@ import kki.domain.Schedule;
 import kki.domain.VerticalSliceSolution;
 
 /**
- * REQ-KKI-006 (réécrit après le bug de cycle de précédence, cf REQ-KKI-006
- * SOLL) — recalcul complet à chaque appel, volontairement simple pour une
- * première version correcte : balaie Schedule.orderSequence (l'axe X, LA
- * seule coordonnée de séquencement) une fois, dérive la séquence par
- * machine par simple filtrage au passage. Plus de shadow variable, plus de
- * risque de cycle — structurellement impossible avec une seule coordonnée
- * partagée. Pas incrémental au sens strict (O(N) par évaluation, pas O(1)) :
- * choix délibéré pour prouver la correction d'abord, mesurer l'IPS réel,
- * optimiser seulement si le chiffre le justifie (PIL-KKI-003 : la vitesse
- * est un multiplicateur, pas l'objectif).
+ * REQ-KKI-006 (réécriture incrémentale) — état persistant (opStart/opEnd par
+ * opération, chaîne machine explicite prevOnMachine/nextOnMachine, coût par
+ * ordre) au lieu d'un balayage complet à chaque calculateScore(). Sur un
+ * changement de Schedule.orderSequence, seule la zone touchée est détachée
+ * puis rattachée — le voisin machine se trouve en indexant DIRECTEMENT
+ * schedule.getOrderSequence() de part et d'autre de la zone (la liste est
+ * déjà mutée au moment des hooks after*), puis propagation par liste de
+ * nœuds sales jusqu'à convergence.
+ * Toute la logique passe par before/afterListVariableChanged UNIQUEMENT —
+ * vérifié dans le code source d'OptaPlanner (ListAssignMove, ListChangeMove,
+ * ListSwapMove, ListUnassignMove, SubListChangeMove) : les 5 encadrent
+ * TOUJOURS leur mutation par un couple beforeListVariableChanged(...,
+ * fromIndex, toIndex) / afterListVariableChanged(..., fromIndex, toIndex),
+ * y compris ListAssignMove/ListUnassignMove qui appellent AUSSI
+ * before/afterListVariableElementAssigned|Unassigned — mais ceux-ci restent
+ * sans effet ici (défauts no-op de l'interface, non surchargés) : le couple
+ * Changed seul suffit, avec fromIndex==toIndex pour "rien à détacher" ou
+ * "rien de nouveau à attacher".
+ * ATTENTION — piège vérifié empiriquement (N=100 réel donnait score=0) :
+ * Order.previousOrderInSequence/nextOrderInSequence (shadow variables)
+ * NE SONT PAS fiables au moment où ces hooks courent. En lisant
+ * IncrementalScoreDirector + VariableListenerSupport : le score-calculator
+ * est notifié DIRECTEMENT depuis before/afterListVariableChanged, alors que
+ * la mise à jour des shadow variables est seulement MISE EN FILE à ce
+ * moment-là et n'est appliquée que plus tard, à
+ * triggerVariableListenersInNotificationQueues(). D'où l'abandon total des
+ * shadow variables ici (Order n'est plus @PlanningEntity) au profit d'un
+ * parcours par INDEX sur la liste, seule source vraiment à jour.
+ * Façon Bellman-Ford sur un DAG : l'ordre de traitement du worklist est
+ * indifférent — un nœud dépilé avant qu'un prédécesseur ait convergé donne
+ * une valeur transitoire, mais tout changement ré-enfile les successeurs,
+ * donc calculateScore() n'est interrogé qu'après un worklist vide, qui
+ * garantit le point fixe correct (unique sur un DAG acyclique).
+ * Pire cas toujours O(N) (un ordre déplacé en tête peut redater tout le
+ * reste, cf. PIL-KKI-003) — le gain se mesure sur le cas courant (mouvement
+ * local de recherche locale), jamais supposé.
+ * Les ids Order/Operation DOIVENT être denses 0..count-1 (invariant de
+ * SyntheticDataGenerator) — indexation directe par tableau, pas de
+ * Map&lt;Long,?&gt; sur le chemin chaud (c'est tout l'objet de PIL-KKI-003).
+ * fullSweepScore() reste l'oracle de non-régression (jamais supprimé,
+ * jamais appelé par calculateScore() en production).
  */
 public class VerticalSliceIncrementalScoreCalculator
         implements IncrementalScoreCalculator<VerticalSliceSolution, HardSoftLongScore> {
@@ -35,10 +68,213 @@ public class VerticalSliceIncrementalScoreCalculator
     public static final AtomicLong CALCULATE_SCORE_CALLS = new AtomicLong();
 
     private VerticalSliceSolution solution;
+    private Schedule schedule;
+    private long scheduleOrigin;
+
+    private long[] opStart;
+    private long[] opEnd;
+    private Operation[] prevOnMachine;
+    private Operation[] nextOnMachine;
+    private long[] orderCost;
+    private boolean[] queued;
+    private long softScoreTotal;
+
+    private final ArrayDeque<Operation> worklist = new ArrayDeque<>();
+    private List<Order> changedRangeBefore;
 
     @Override
-    public void resetWorkingSolution(VerticalSliceSolution solution) {
-        this.solution = solution;
+    public void resetWorkingSolution(VerticalSliceSolution workingSolution) {
+        this.solution = workingSolution;
+        this.schedule = workingSolution.getScheduleList().get(0);
+        int opCount = workingSolution.getOperationList().size();
+        int orderCount = workingSolution.getOrderList().size();
+        opStart = new long[opCount];
+        opEnd = new long[opCount];
+        prevOnMachine = new Operation[opCount];
+        nextOnMachine = new Operation[opCount];
+        orderCost = new long[orderCount];
+        queued = new boolean[opCount];
+        scheduleOrigin = SyntheticDataGenerator.BASE_EPOCH;
+        worklist.clear();
+        fullRebuild();
+    }
+
+    private void fullRebuild() {
+        Map<Long, Operation> machineTail = new HashMap<>();
+        softScoreTotal = 0L;
+        for (Order order : schedule.getOrderSequence()) {
+            long previousEndInOrder = scheduleOrigin;
+            long lastEnd = scheduleOrigin;
+            for (Operation op : order.getOperations()) {
+                Operation machinePred = machineTail.get(op.getMachineId());
+                long machinePredEnd = machinePred != null ? opEnd[idx(machinePred)] : scheduleOrigin;
+                long start = Math.max(machinePredEnd, previousEndInOrder);
+                long end = start + op.getDurationSeconds();
+                opStart[idx(op)] = start;
+                opEnd[idx(op)] = end;
+                prevOnMachine[idx(op)] = machinePred;
+                nextOnMachine[idx(op)] = null;
+                if (machinePred != null) {
+                    nextOnMachine[idx(machinePred)] = op;
+                }
+                machineTail.put(op.getMachineId(), op);
+                previousEndInOrder = end;
+                lastEnd = end;
+            }
+            long cost = computeOrderCost(order, lastEnd);
+            orderCost[(int) order.getId()] = cost;
+            softScoreTotal -= cost;
+        }
+    }
+
+    /**
+     * Oracle de non-régression : balayage complet à froid, indépendant de
+     * l'état incrémental. Ne touche à aucun champ persistant.
+     */
+    HardSoftLongScore fullSweepScore() {
+        Map<Long, Long> lastEndByMachine = new HashMap<>();
+        long soft = 0L;
+        for (Order order : schedule.getOrderSequence()) {
+            long previousEndInOrder = scheduleOrigin;
+            long lastOperationEnd = scheduleOrigin;
+            for (Operation op : order.getOperations()) {
+                long machinePredEnd = lastEndByMachine.getOrDefault(op.getMachineId(), scheduleOrigin);
+                long start = Math.max(machinePredEnd, previousEndInOrder);
+                long end = start + op.getDurationSeconds();
+                lastEndByMachine.put(op.getMachineId(), end);
+                previousEndInOrder = end;
+                lastOperationEnd = end;
+            }
+            soft -= computeOrderCost(order, lastOperationEnd);
+        }
+        return HardSoftLongScore.of(0L, soft);
+    }
+
+    private static int idx(Operation op) {
+        return (int) op.getId();
+    }
+
+    private long computeOrderCost(Order order, long completionEpochSec) {
+        float hoursLateOrEarly = (completionEpochSec - order.getRequiredDueEpochSec()) / 3600f;
+        float cost = CostKernel.cost(order.getPriorityWeight(), K, hoursLateOrEarly);
+        return Math.round((double) cost);
+    }
+
+    private void enqueue(Operation op) {
+        if (op != null && !queued[idx(op)]) {
+            queued[idx(op)] = true;
+            worklist.add(op);
+        }
+    }
+
+    private Operation findMachinePredecessor(int fromIndexInclusive, long machineId) {
+        List<Order> sequence = schedule.getOrderSequence();
+        for (int i = fromIndexInclusive; i >= 0; i--) {
+            List<Operation> ops = sequence.get(i).getOperations();
+            for (int j = ops.size() - 1; j >= 0; j--) {
+                if (ops.get(j).getMachineId() == machineId) {
+                    return ops.get(j);
+                }
+            }
+        }
+        return null;
+    }
+
+    private Operation findMachineSuccessor(int fromIndexInclusive, long machineId) {
+        List<Order> sequence = schedule.getOrderSequence();
+        int size = sequence.size();
+        for (int i = fromIndexInclusive; i < size; i++) {
+            for (Operation candidate : sequence.get(i).getOperations()) {
+                if (candidate.getMachineId() == machineId) {
+                    return candidate;
+                }
+            }
+        }
+        return null;
+    }
+
+    private void detachFromMachineChain(Operation op) {
+        Operation pred = prevOnMachine[idx(op)];
+        Operation succ = nextOnMachine[idx(op)];
+        if (pred != null) {
+            nextOnMachine[idx(pred)] = succ;
+        }
+        if (succ != null) {
+            prevOnMachine[idx(succ)] = pred;
+            enqueue(succ);
+        }
+        prevOnMachine[idx(op)] = null;
+        nextOnMachine[idx(op)] = null;
+    }
+
+    private void attachToMachineChain(Operation op, int orderIndex) {
+        Order order = op.getOrder();
+        List<Operation> ops = order.getOperations();
+        int i = op.getSequenceIndexInOrder();
+
+        Operation pred = null;
+        for (int j = i - 1; j >= 0 && pred == null; j--) {
+            if (ops.get(j).getMachineId() == op.getMachineId()) {
+                pred = ops.get(j);
+            }
+        }
+        if (pred == null) {
+            pred = findMachinePredecessor(orderIndex - 1, op.getMachineId());
+        }
+
+        Operation succ = null;
+        for (int j = i + 1; j < ops.size() && succ == null; j++) {
+            if (ops.get(j).getMachineId() == op.getMachineId()) {
+                succ = ops.get(j);
+            }
+        }
+        if (succ == null) {
+            succ = findMachineSuccessor(orderIndex + 1, op.getMachineId());
+        }
+
+        prevOnMachine[idx(op)] = pred;
+        nextOnMachine[idx(op)] = succ;
+        if (pred != null) {
+            nextOnMachine[idx(pred)] = op;
+        }
+        if (succ != null) {
+            prevOnMachine[idx(succ)] = op;
+            enqueue(succ);
+        }
+        enqueue(op);
+    }
+
+    private void propagate() {
+        while (!worklist.isEmpty()) {
+            Operation op = worklist.poll();
+            queued[idx(op)] = false;
+
+            Order order = op.getOrder();
+            List<Operation> ops = order.getOperations();
+            int i = op.getSequenceIndexInOrder();
+            long orderPredEnd = i == 0 ? scheduleOrigin : opEnd[idx(ops.get(i - 1))];
+            Operation machinePred = prevOnMachine[idx(op)];
+            long machinePredEnd = machinePred != null ? opEnd[idx(machinePred)] : scheduleOrigin;
+
+            long newStart = Math.max(orderPredEnd, machinePredEnd);
+            long newEnd = newStart + op.getDurationSeconds();
+            if (newStart == opStart[idx(op)] && newEnd == opEnd[idx(op)]) {
+                continue;
+            }
+            opStart[idx(op)] = newStart;
+            opEnd[idx(op)] = newEnd;
+
+            if (i + 1 < ops.size()) {
+                enqueue(ops.get(i + 1));
+            } else {
+                int oi = (int) order.getId();
+                long newCost = computeOrderCost(order, newEnd);
+                softScoreTotal += orderCost[oi];
+                softScoreTotal -= newCost;
+                orderCost[oi] = newCost;
+            }
+            enqueue(nextOnMachine[idx(op)]);
+        }
     }
 
     @Override
@@ -58,6 +294,28 @@ public class VerticalSliceIncrementalScoreCalculator
     }
 
     @Override
+    public void beforeListVariableChanged(Object entity, String variableName, int fromIndex, int toIndex) {
+        changedRangeBefore = new ArrayList<>(schedule.getOrderSequence().subList(fromIndex, toIndex));
+    }
+
+    @Override
+    public void afterListVariableChanged(Object entity, String variableName, int fromIndex, int toIndex) {
+        for (Order order : changedRangeBefore) {
+            for (Operation op : order.getOperations()) {
+                detachFromMachineChain(op);
+            }
+        }
+        List<Order> sequence = schedule.getOrderSequence();
+        for (int i = fromIndex; i < toIndex; i++) {
+            for (Operation op : sequence.get(i).getOperations()) {
+                attachToMachineChain(op, i);
+            }
+        }
+        propagate();
+        changedRangeBefore = null;
+    }
+
+    @Override
     public void beforeEntityRemoved(Object entity) {
     }
 
@@ -68,38 +326,6 @@ public class VerticalSliceIncrementalScoreCalculator
     @Override
     public HardSoftLongScore calculateScore() {
         CALCULATE_SCORE_CALLS.incrementAndGet();
-
-        Schedule schedule = solution.getScheduleList().get(0);
-        List<Order> orderSequence = schedule.getOrderSequence();
-
-        // Meme origine absolue que les dates dues (SyntheticDataGenerator.BASE_EPOCH) —
-        // sans ca, un balayage relatif-a-zero se compare a des dates epoch absolues et
-        // "l'avance" explose (bug reel observe : score ~ -11 mille milliards a N=100).
-        long scheduleOrigin = SyntheticDataGenerator.BASE_EPOCH;
-        Map<Long, Long> lastEndByMachine = new HashMap<>();
-        long softScore = 0L;
-
-        for (Order order : orderSequence) {
-            long previousEndInOrder = scheduleOrigin;
-            long lastOperationEnd = scheduleOrigin;
-            for (Operation op : order.getOperations()) {
-                long machinePredEnd = lastEndByMachine.getOrDefault(op.getMachineId(), scheduleOrigin);
-                long start = Math.max(machinePredEnd, previousEndInOrder);
-                long end = start + op.getDurationSeconds();
-                lastEndByMachine.put(op.getMachineId(), end);
-                previousEndInOrder = end;
-                lastOperationEnd = end;
-            }
-            float hoursLateOrEarly = (lastOperationEnd - order.getRequiredDueEpochSec()) / 3600f;
-            float cost = CostKernel.cost(order.getPriorityWeight(), K, hoursLateOrEarly);
-            // Math.round(float) renvoie un int — deborde silencieusement si un ordre
-            // accumule un retard massif sous une CH gloutonne (observe empiriquement :
-            // score ~ -Integer.MIN_VALUE x N). Math.round(double) renvoie un long :
-            // exactement le risque de depassement que le choix quadratique (pas
-            // exponentiel) visait deja a eviter, cf corps CPT-KKI-009.
-            softScore -= Math.round((double) cost);
-        }
-
-        return HardSoftLongScore.of(0L, softScore);
+        return HardSoftLongScore.of(0L, softScoreTotal);
     }
 }

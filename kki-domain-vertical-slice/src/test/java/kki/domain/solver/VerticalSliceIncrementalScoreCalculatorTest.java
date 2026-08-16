@@ -40,13 +40,13 @@ class VerticalSliceIncrementalScoreCalculatorTest {
         Machine m2 = new Machine(2, 100);
 
         long origin = SyntheticDataGenerator.BASE_EPOCH;
-        Order orderA = new Order(1, 100, 2, origin + 14_400L);
-        Operation a1 = new Operation(11, orderA, 0, 3_600L, m1.getId());
-        Operation a2 = new Operation(12, orderA, 1, 3_600L, m2.getId());
+        Order orderA = new Order(0, 100, 2, origin + 14_400L);
+        Operation a1 = new Operation(0, orderA, 0, 3_600L, m1.getId());
+        Operation a2 = new Operation(1, orderA, 1, 3_600L, m2.getId());
         orderA.setOperations(List.of(a1, a2));
 
-        Order orderB = new Order(2, 200, 3, origin);
-        Operation b1 = new Operation(21, orderB, 0, 1_800L, m1.getId());
+        Order orderB = new Order(1, 200, 3, origin);
+        Operation b1 = new Operation(2, orderB, 0, 1_800L, m1.getId());
         orderB.setOperations(List.of(b1));
 
         Schedule schedule = new Schedule();

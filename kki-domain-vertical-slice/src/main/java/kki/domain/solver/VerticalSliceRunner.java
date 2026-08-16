@@ -10,7 +10,6 @@ import org.optaplanner.core.config.score.director.ScoreDirectorFactoryConfig;
 import org.optaplanner.core.config.solver.SolverConfig;
 import org.optaplanner.core.config.solver.termination.TerminationConfig;
 
-import kki.domain.Order;
 import kki.domain.Schedule;
 import kki.domain.VerticalSliceSolution;
 
@@ -35,7 +34,7 @@ public final class VerticalSliceRunner {
 
         SolverConfig solverConfig = new SolverConfig();
         solverConfig.setSolutionClass(VerticalSliceSolution.class);
-        solverConfig.setEntityClassList(List.of(Order.class, Schedule.class));
+        solverConfig.setEntityClassList(List.of(Schedule.class));
 
         ScoreDirectorFactoryConfig scoreDirectorFactoryConfig = new ScoreDirectorFactoryConfig();
         scoreDirectorFactoryConfig.setIncrementalScoreCalculatorClass(VerticalSliceIncrementalScoreCalculator.class);

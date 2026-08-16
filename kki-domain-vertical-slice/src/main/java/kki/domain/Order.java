@@ -2,29 +2,30 @@ package kki.domain;
 
 import java.util.List;
 
-import org.optaplanner.core.api.domain.entity.PlanningEntity;
-import org.optaplanner.core.api.domain.variable.NextElementShadowVariable;
-import org.optaplanner.core.api.domain.variable.PreviousElementShadowVariable;
-
 /**
- * REQ-KKI-006 (réécrit) — la VALEUR de la seule variable de planification de
- * cette tranche : sa position sur l'axe X (Schedule.orderSequence,
- * @PlanningListVariable). Toutes ses opérations se déplacent avec elle en
- * bloc (CPT-KKI-003) — structurellement garanti, plus besoin d'un mouvement
- * Pillar dédié : déplacer un Order dans la liste déplace tout son bloc.
+ * REQ-KKI-006 — fait fixe : la VALEUR de la seule variable de planification
+ * de cette tranche (Schedule.orderSequence, @PlanningListVariable). Toutes
+ * ses opérations se déplacent avec elle en bloc (CPT-KKI-003) —
+ * structurellement garanti, un déplacement d'Order dans la liste déplace
+ * tout son bloc.
+ * Pas de shadow variable ici : previousOrderInSequence/nextOrderInSequence
+ * ont été essayées puis retirées — elles ne sont fiables qu'après
+ * triggerVariableListeners(), qui n'a pas encore couru au moment où
+ * VerticalSliceIncrementalScoreCalculator reçoit before/afterListVariable*
+ * (vérifié en lisant IncrementalScoreDirector/AbstractScoreDirector :
+ * le score-calculator est notifié AVANT que la file de notification des
+ * shadow variables ne soit déclenchée). Le calculateur retrouve ses
+ * voisins machine par indexation directe sur Schedule.orderSequence (déjà
+ * mutée au moment des hooks after*), pas par chaînage de shadow variable.
+ * Order n'a donc plus besoin d'être @PlanningEntity.
  */
-@PlanningEntity
-public class Order {
+public final class Order {
 
     private long id;
     private long articleId;
     private int priorityWeight;
     private long requiredDueEpochSec;
     private List<Operation> operations;
-
-    // Shadow variables (dérivées de Schedule.orderSequence)
-    private Order previousOrderInSequence;
-    private Order nextOrderInSequence;
 
     public Order() {
     }
@@ -58,24 +59,6 @@ public class Order {
 
     public List<Operation> getOperations() {
         return operations;
-    }
-
-    @PreviousElementShadowVariable(sourceVariableName = "orderSequence")
-    public Order getPreviousOrderInSequence() {
-        return previousOrderInSequence;
-    }
-
-    public void setPreviousOrderInSequence(Order previousOrderInSequence) {
-        this.previousOrderInSequence = previousOrderInSequence;
-    }
-
-    @NextElementShadowVariable(sourceVariableName = "orderSequence")
-    public Order getNextOrderInSequence() {
-        return nextOrderInSequence;
-    }
-
-    public void setNextOrderInSequence(Order nextOrderInSequence) {
-        this.nextOrderInSequence = nextOrderInSequence;
     }
 
     @Override
