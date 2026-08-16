@@ -72,11 +72,26 @@ public final class VerticalSliceRunner {
         ScoreDirectorFactoryConfig scoreDirectorFactoryConfig = new ScoreDirectorFactoryConfig();
         scoreDirectorFactoryConfig.setIncrementalScoreCalculatorClass(VerticalSliceIncrementalScoreCalculator.class);
 
-        runConstructionHeuristicDiagnostic(unsolved, scoreDirectorFactoryConfig);
-        runLocalSearchFromNaiveStart(unsolved, scoreDirectorFactoryConfig);
+        VerticalSliceSolution chSolved = runConstructionHeuristicDiagnostic(unsolved, scoreDirectorFactoryConfig);
+
+        Schedule naiveSchedule = new Schedule();
+        naiveSchedule.setOrderSequence(new ArrayList<>(unsolved.getOrderList()));
+        VerticalSliceSolution naiveStart = new VerticalSliceSolution(
+                unsolved.getOrderList(), unsolved.getOperationList(), unsolved.getMachineList(), List.of(naiveSchedule));
+        runLocalSearch(naiveStart, "naive", scoreDirectorFactoryConfig);
+
+        // REQ-KKI-008 : pops_per_call sur un départ CH réel (structuré) vs le départ
+        // naïf ci-dessus (ordre de génération, dépendances non structurées) — décide si
+        // la pathologie de propagate() (1.58M pops/appel mesuré à N=5000 naïf) vient du
+        // départ naïf spécifiquement ou est une propriété générale de l'algorithme. Ne
+        // tourne que si CH a placé tout le monde (sinon assertWorkingSolutionInitialized
+        // rejette, cf. commentaire de classe).
+        if (chSolved.getScheduleList().get(0).getOrderSequence().size() == chSolved.getOrderList().size()) {
+            runLocalSearch(chSolved, "ch_start", scoreDirectorFactoryConfig);
+        }
     }
 
-    private static void runConstructionHeuristicDiagnostic(VerticalSliceSolution unsolved,
+    private static VerticalSliceSolution runConstructionHeuristicDiagnostic(VerticalSliceSolution unsolved,
             ScoreDirectorFactoryConfig scoreDirectorFactoryConfig) throws InterruptedException, java.util.concurrent.ExecutionException {
         SolverConfig chConfig = new SolverConfig();
         chConfig.setSolutionClass(VerticalSliceSolution.class);
@@ -99,15 +114,11 @@ public final class VerticalSliceRunner {
         long chPlaced = chSolved.getScheduleList().get(0).getOrderSequence().size();
         System.out.printf("ch_done score=%s ch_seconds=%.2f ch_calculateScore_calls=%d placed_orders=%d/%d%n",
                 chSolved.getScore(), chSeconds, chCalls, chPlaced, chSolved.getOrderList().size());
+        return chSolved;
     }
 
-    private static void runLocalSearchFromNaiveStart(VerticalSliceSolution unsolved,
+    private static void runLocalSearch(VerticalSliceSolution start, String label,
             ScoreDirectorFactoryConfig scoreDirectorFactoryConfig) throws InterruptedException, java.util.concurrent.ExecutionException {
-        Schedule naiveSchedule = new Schedule();
-        naiveSchedule.setOrderSequence(new ArrayList<>(unsolved.getOrderList()));
-        VerticalSliceSolution naiveStart = new VerticalSliceSolution(
-                unsolved.getOrderList(), unsolved.getOperationList(), unsolved.getMachineList(), List.of(naiveSchedule));
-
         SolverConfig lsConfig = new SolverConfig();
         lsConfig.setSolutionClass(VerticalSliceSolution.class);
         lsConfig.setEntityClassList(List.of(Schedule.class));
@@ -121,10 +132,11 @@ public final class VerticalSliceRunner {
         VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.set(0);
         VerticalSliceIncrementalScoreCalculator.FIRST_CALL_NANOS.set(0L);
         VerticalSliceIncrementalScoreCalculator.PROPAGATION_NANOS.set(0L);
+        VerticalSliceIncrementalScoreCalculator.PROPAGATE_POPS.set(0L);
         long lsStartNanos = System.nanoTime();
         VerticalSliceSolution lsSolved;
         try (SolverManager<VerticalSliceSolution, Long> lsManager = SolverManager.create(lsConfig)) {
-            lsSolved = lsManager.solve(2L, naiveStart).getFinalBestSolution();
+            lsSolved = lsManager.solve(2L, start).getFinalBestSolution();
         }
         double lsSeconds = (System.nanoTime() - lsStartNanos) / 1_000_000_000.0;
         long lsCalls = VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.get();
@@ -132,9 +144,11 @@ public final class VerticalSliceRunner {
         long firstCallNanos = VerticalSliceIncrementalScoreCalculator.FIRST_CALL_NANOS.get();
         double setupSeconds = firstCallNanos == 0L ? -1.0 : (firstCallNanos - lsStartNanos) / 1_000_000_000.0;
         double propagationSeconds = VerticalSliceIncrementalScoreCalculator.PROPAGATION_NANOS.get() / 1_000_000_000.0;
+        long propagatePops = VerticalSliceIncrementalScoreCalculator.PROPAGATE_POPS.get();
+        double popsPerCall = lsCalls == 0 ? -1.0 : (double) propagatePops / lsCalls;
         System.out.printf(
-                "ls_done score=%s ls_seconds=%.2f ls_calculateScore_calls=%d ls_ips=%.1f setup_seconds_before_first_call=%.2f propagation_seconds=%.2f propagation_pct=%.1f%n",
-                lsSolved.getScore(), lsSeconds, lsCalls, lsIps, setupSeconds, propagationSeconds,
-                100.0 * propagationSeconds / lsSeconds);
+                "ls_done[%s] score=%s ls_seconds=%.2f ls_calculateScore_calls=%d ls_ips=%.1f setup_seconds_before_first_call=%.2f propagation_seconds=%.2f propagation_pct=%.1f propagate_pops=%d pops_per_call=%.1f%n",
+                label, lsSolved.getScore(), lsSeconds, lsCalls, lsIps, setupSeconds, propagationSeconds,
+                100.0 * propagationSeconds / lsSeconds, propagatePops, popsPerCall);
     }
 }

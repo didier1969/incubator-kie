@@ -69,10 +69,15 @@ class IncrementalPropagationDifferentialTest {
         assertEquals(calculator.fullSweepScore(), calculator.calculateScore());
 
         for (int move = 0; move < 200; move++) {
-            boolean reversal = random.nextBoolean();
+            // REQ-KKI-008 : 3 formes, dont swap (ListSwapMove même entité — jamais exercée
+            // avant ce REQ) qui déclenche le chemin rapide de findDisplacedOrders le plus
+            // agressivement (span large, seulement 2 ordres réellement déplacés).
+            int moveKind = random.nextInt(3);
+            String moveLabel;
             int lo;
             int hi;
-            if (reversal) {
+            if (moveKind == 0) {
+                moveLabel = "reverse";
                 int a = random.nextInt(sequence.size());
                 int b = random.nextInt(sequence.size());
                 lo = Math.min(a, b);
@@ -82,7 +87,8 @@ class IncrementalPropagationDifferentialTest {
                 }
                 calculator.beforeListVariableChanged(schedule, "orderSequence", lo, hi);
                 java.util.Collections.reverse(sequence.subList(lo, hi));
-            } else {
+            } else if (moveKind == 1) {
+                moveLabel = "relocate";
                 int from = random.nextInt(sequence.size());
                 int to = random.nextInt(sequence.size());
                 if (from == to) {
@@ -93,13 +99,27 @@ class IncrementalPropagationDifferentialTest {
                 calculator.beforeListVariableChanged(schedule, "orderSequence", lo, hi);
                 Order moved = sequence.remove(from);
                 sequence.add(to > from ? to - 1 : to, moved);
+            } else {
+                moveLabel = "swap";
+                int left = random.nextInt(sequence.size());
+                int right = random.nextInt(sequence.size());
+                if (left == right) {
+                    continue;
+                }
+                lo = Math.min(left, right);
+                hi = Math.max(left, right) + 1;
+                calculator.beforeListVariableChanged(schedule, "orderSequence", lo, hi);
+                Order leftOrder = sequence.get(left);
+                Order rightOrder = sequence.get(right);
+                sequence.set(left, rightOrder);
+                sequence.set(right, leftOrder);
             }
             calculator.afterListVariableChanged(schedule, "orderSequence", lo, hi);
 
             HardSoftLongScore incremental = calculator.calculateScore();
             HardSoftLongScore oracle = calculator.fullSweepScore();
             assertEquals(oracle, incremental,
-                    "divergence after move " + move + " (" + (reversal ? "reverse" : "relocate") + " " + lo + ".." + hi + ")");
+                    "divergence after move " + move + " (" + moveLabel + " " + lo + ".." + hi + ")");
         }
     }
 }

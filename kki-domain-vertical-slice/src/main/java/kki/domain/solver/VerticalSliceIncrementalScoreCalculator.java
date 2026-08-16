@@ -63,6 +63,14 @@ import kki.domain.VerticalSliceSolution;
  * Pire cas toujours O(N) (un ordre déplacé en tête peut redater tout le
  * reste, cf. PIL-KKI-003) — le gain se mesure sur le cas courant (mouvement
  * local de recherche locale), jamais supposé.
+ * REQ-KKI-008 : détacher/rattacher TOUT le span [fromIndex,toIndex) sur un
+ * mouvement même-taille (relocate/swap) mesurait 98.6% du temps mur de la
+ * recherche locale (N=5000) alors qu'un seul ordre est réellement déplacé
+ * dans un relocate, deux dans un swap — le reste du span n'a fait que
+ * décaler de position sans que son adjacence machine change. Voir
+ * findDisplacedOrders : ensemble minimal par comparaison position-à-
+ * position, repli sûr sur tout le span pour toute forme non reconnue
+ * (reversal, sous-liste). PROPAGATION_NANOS mesure le résultat en continu.
  * Les ids Order/Operation DOIVENT être denses 0..count-1 (invariant de
  * SyntheticDataGenerator) — indexation directe par tableau, pas de
  * Map&lt;Long,?&gt; sur le chemin chaud (c'est tout l'objet de PIL-KKI-003).
@@ -101,6 +109,15 @@ public class VerticalSliceIncrementalScoreCalculator
      * future régression de performance, pas du code d'appoint à retirer.
      */
     public static final AtomicLong PROPAGATION_NANOS = new AtomicLong(0L);
+
+    /**
+     * Nombre total de noeuds dépilés du worklist (REQ-KKI-008, discriminant
+     * détachement/rattachement vs cascade propagate() elle-même) — si ce
+     * nombre reste élevé malgré un ensemble déplacé réduit (findDisplacedOrders),
+     * le coût est dans l'étendue de la cascade Bellman-Ford, pas dans le
+     * volume détaché/rattaché.
+     */
+    public static final AtomicLong PROPAGATE_POPS = new AtomicLong(0L);
 
     private VerticalSliceSolution solution;
     private Schedule schedule;
@@ -315,9 +332,83 @@ public class VerticalSliceIncrementalScoreCalculator
         enqueue(op);
     }
 
+    /**
+     * REQ-KKI-008 — identifie l'ensemble minimal d'ordres à détacher/
+     * rattacher pour un mouvement MÊME-TAILLE, par une seule passe de
+     * comparaison position-à-position ancien/nouveau span — sans table LCS.
+     * Mesuré : sans ce filtre, un relocate à grande portée (span ~L/3 en
+     * moyenne) rattachait ~1667 ordres/mouvement à L=5000 pour 1 seul
+     * réellement déplacé (455× le régime CH, cf. corps REQ-KKI-008).
+     * Trois formes reconnues :
+     *  - swap (ListSwapMove même entité, avant(min,max+1)) : exactement 2
+     *    positions diffèrent → seuls ces 2 ordres sont déplacés, le reste
+     *    du span est identique en contenu ET en position (adjacence
+     *    machine inchangée par construction).
+     *  - relocate (ListChangeMove) : toutes les positions diffèrent MAIS
+     *    selon un motif de décalage en bloc d'un cran (old[i+1]==new[i]
+     *    partout sauf un, ou son miroir) → un seul ordre réellement
+     *    déplacé aux deux extrémités du span ; le bloc décalé garde son
+     *    ordre relatif entre ses éléments, donc son adjacence machine
+     *    mutuelle est inchangée.
+     *  - toute autre forme (reversal, sous-liste, etc.) : repli sûr PAR
+     *    CONSTRUCTION — tout le span ancien est retourné, comportement
+     *    identique à avant cette optimisation (pas plus rapide, jamais
+     *    moins correct).
+     * Le même ensemble retourné ici DOIT servir à la fois au détachement
+     * et au rattachement dans afterListVariableChanged — sinon des
+     * pointeurs prevOnMachine/nextOnMachine détachés (mis à null) ne sont
+     * jamais rattachés.
+     */
+    private List<Order> findDisplacedOrders(List<Order> oldSpan, int fromIndex, int toIndex, List<Order> sequence) {
+        int span = toIndex - fromIndex;
+        if (span < 2) {
+            return oldSpan;
+        }
+        int diffCount = 0;
+        int firstDiff = -1;
+        int lastDiff = -1;
+        for (int i = 0; i < span; i++) {
+            if (oldSpan.get(i) != sequence.get(fromIndex + i)) {
+                diffCount++;
+                if (firstDiff == -1) {
+                    firstDiff = i;
+                }
+                lastDiff = i;
+            }
+        }
+        if (diffCount == 0) {
+            return List.of();
+        }
+        if (diffCount == 2) {
+            return List.of(oldSpan.get(firstDiff), oldSpan.get(lastDiff));
+        }
+        if (diffCount == span) {
+            boolean shiftLeft = true;
+            for (int i = 0; i < span - 1 && shiftLeft; i++) {
+                if (oldSpan.get(i + 1) != sequence.get(fromIndex + i)) {
+                    shiftLeft = false;
+                }
+            }
+            if (shiftLeft && sequence.get(toIndex - 1) == oldSpan.get(0)) {
+                return List.of(oldSpan.get(0));
+            }
+            boolean shiftRight = true;
+            for (int i = 1; i < span && shiftRight; i++) {
+                if (oldSpan.get(i - 1) != sequence.get(fromIndex + i)) {
+                    shiftRight = false;
+                }
+            }
+            if (shiftRight && sequence.get(fromIndex) == oldSpan.get(span - 1)) {
+                return List.of(oldSpan.get(span - 1));
+            }
+        }
+        return oldSpan;
+    }
+
     private void propagate() {
         while (!worklist.isEmpty()) {
             Operation op = worklist.poll();
+            PROPAGATE_POPS.incrementAndGet();
             queued[idx(op)] = false;
 
             Order order = op.getOrder();
@@ -372,29 +463,47 @@ public class VerticalSliceIncrementalScoreCalculator
     @Override
     public void afterListVariableChanged(Object entity, String variableName, int fromIndex, int toIndex) {
         long propagationStartNanos = System.nanoTime();
-        for (Order order : changedRangeBefore) {
-            for (Operation op : order.getOperations()) {
-                detachFromMachineChain(op);
-            }
-        }
         List<Order> sequence = schedule.getOrderSequence();
-        if (changedRangeBefore.size() != toIndex - fromIndex) {
+        boolean sameSize = changedRangeBefore.size() == toIndex - fromIndex;
+        if (sameSize) {
+            // REQ-KKI-008 : ensemble minimal (swap/relocate) au lieu de tout le span —
+            // voir findDisplacedOrders. Le MÊME ensemble sert au détachement et au
+            // rattachement ci-dessous, condition de correction (cf. javadoc de la méthode).
+            List<Order> displaced = findDisplacedOrders(changedRangeBefore, fromIndex, toIndex, sequence);
+            for (Order order : displaced) {
+                for (Operation op : order.getOperations()) {
+                    detachFromMachineChain(op);
+                }
+            }
+            for (int i = fromIndex; i < toIndex; i++) {
+                xPosition[(int) sequence.get(i).getId()] = i;
+            }
+            for (Order order : displaced) {
+                int orderIndex = xPosition[(int) order.getId()];
+                for (Operation op : order.getOperations()) {
+                    attachToMachineChain(op, orderIndex);
+                }
+            }
+        } else {
             // Net insert/unassign (ListAssignMove/ListUnassignMove) : the index shift extends
             // past [fromIndex,toIndex) to the rest of the list, unlike same-size relocate/swap/
             // reversal moves where the span fully bounds it. Only construction heuristic hits
             // this branch here (every Order is mandatory, never unassigned again once placed).
+            for (Order order : changedRangeBefore) {
+                for (Operation op : order.getOperations()) {
+                    detachFromMachineChain(op);
+                }
+            }
             // Positions before fromIndex provably never shift — resync from fromIndex only, not 0.
             for (int i = fromIndex; i < sequence.size(); i++) {
                 xPosition[(int) sequence.get(i).getId()] = i;
             }
-        } else {
+            // [fromIndex,toIndex) already bounds exactly what's new here (empty on unassign,
+            // the single inserted element on assign) — no narrowing needed, already minimal.
             for (int i = fromIndex; i < toIndex; i++) {
-                xPosition[(int) sequence.get(i).getId()] = i;
-            }
-        }
-        for (int i = fromIndex; i < toIndex; i++) {
-            for (Operation op : sequence.get(i).getOperations()) {
-                attachToMachineChain(op, i);
+                for (Operation op : sequence.get(i).getOperations()) {
+                    attachToMachineChain(op, i);
+                }
             }
         }
         propagate();
