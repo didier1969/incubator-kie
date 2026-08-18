@@ -66,6 +66,7 @@ public final class VerticalSliceRunner {
     private static final int MACHINE_COUNT = 1000;
     private static final long CH_SECONDS = 60L;
     private static final long LOCAL_SEARCH_SECONDS = 30L;
+    private static final int NEARBY_POOL_SIZE_DEFAULT = 50;
 
     private VerticalSliceRunner() {
     }
@@ -77,6 +78,18 @@ public final class VerticalSliceRunner {
         // (REQ-KKI-007, diagnostic sensibilite au budget temps) ; defaut LOCAL_SEARCH_SECONDS,
         // comportement inchange si absent.
         long naiveLsSeconds = args.length > 1 ? Long.parseLong(args[1]) : LOCAL_SEARCH_SECONDS;
+        // arg[2] = taille de pool nearby (REQ-KKI-007 piste (d), sweep) ; defaut
+        // NEARBY_POOL_SIZE_DEFAULT = la valeur mesuree a la session precedente, donc
+        // comportement inchange si absent.
+        int nearbyPoolSize = args.length > 2 ? Integer.parseInt(args[2]) : NEARBY_POOL_SIZE_DEFAULT;
+        // arg[3] = sauter la CH diagnostic (REQ-KKI-007) : a N>=1000 elle ne termine pas
+        // (O(N2) essais, cf. corps du REQ) et consomme CH_SECONDS par point de mesure pour
+        // un resultat inutilise -- le bras ch_start en depend et est saute avec elle.
+        boolean skipCh = args.length > 3 && Boolean.parseBoolean(args[3]);
+        // arg[4] = borne en NOMBRE DE PAS au lieu du temps (0 = borne au temps, defaut).
+        // Sert a comparer deux bras a nombre de mouvements egal : separe "qualite par
+        // mouvement" de "mouvements par seconde" dans score(T) = produit des deux.
+        long stepCountLimit = args.length > 4 ? Long.parseLong(args[4]) : 0L;
         VerticalSliceSolution unsolved = SyntheticDataGenerator.generate(orderCount, MACHINE_COUNT, 42L);
         System.out.printf("generated orders=%d operations=%d machines=%d%n",
                 unsolved.getOrderList().size(), unsolved.getOperationList().size(), unsolved.getMachineList().size());
@@ -84,13 +97,15 @@ public final class VerticalSliceRunner {
         ScoreDirectorFactoryConfig scoreDirectorFactoryConfig = new ScoreDirectorFactoryConfig();
         scoreDirectorFactoryConfig.setIncrementalScoreCalculatorClass(VerticalSliceIncrementalScoreCalculator.class);
 
-        VerticalSliceSolution chSolved = runConstructionHeuristicDiagnostic(unsolved, scoreDirectorFactoryConfig);
+        VerticalSliceSolution chSolved =
+                skipCh ? null : runConstructionHeuristicDiagnostic(unsolved, scoreDirectorFactoryConfig);
 
         Schedule naiveSchedule = new Schedule();
         naiveSchedule.setOrderSequence(new ArrayList<>(unsolved.getOrderList()));
         VerticalSliceSolution naiveStart = new VerticalSliceSolution(
                 unsolved.getOrderList(), unsolved.getOperationList(), unsolved.getMachineList(), List.of(naiveSchedule));
-        runLocalSearch(naiveStart, "naive", scoreDirectorFactoryConfig, naiveLsSeconds, false);
+        runLocalSearch(naiveStart, "naive", scoreDirectorFactoryConfig, naiveLsSeconds, false,
+                nearbyPoolSize, stepCountLimit);
 
         // REQ-KKI-007 piste (d) : meme depart naif, meme budget, SEULE la selection de
         // mouvement change (nearby au lieu d'uniforme sur toute la sequence) --
@@ -98,7 +113,8 @@ public final class VerticalSliceRunner {
         // mean_span_per_move doit chuter nettement (sinon la config est inerte, pas
         // "sans effet" -- verifier avant d'interpreter ls_ips/score, cf. corps
         // REQ-KKI-006/007).
-        runLocalSearch(naiveStart, "naive_nearby", scoreDirectorFactoryConfig, naiveLsSeconds, true);
+        runLocalSearch(naiveStart, "naive_nearby", scoreDirectorFactoryConfig, naiveLsSeconds, true,
+                nearbyPoolSize, stepCountLimit);
 
         // REQ-KKI-008 : pops_per_call sur un départ CH réel (structuré) vs le départ
         // naïf ci-dessus (ordre de génération, dépendances non structurées) — décide si
@@ -106,8 +122,10 @@ public final class VerticalSliceRunner {
         // départ naïf spécifiquement ou est une propriété générale de l'algorithme. Ne
         // tourne que si CH a placé tout le monde (sinon assertWorkingSolutionInitialized
         // rejette, cf. commentaire de classe).
-        if (chSolved.getScheduleList().get(0).getOrderSequence().size() == chSolved.getOrderList().size()) {
-            runLocalSearch(chSolved, "ch_start", scoreDirectorFactoryConfig, LOCAL_SEARCH_SECONDS, false);
+        if (chSolved != null
+                && chSolved.getScheduleList().get(0).getOrderSequence().size() == chSolved.getOrderList().size()) {
+            runLocalSearch(chSolved, "ch_start", scoreDirectorFactoryConfig, LOCAL_SEARCH_SECONDS, false,
+                    nearbyPoolSize, stepCountLimit);
         }
     }
 
@@ -138,18 +156,28 @@ public final class VerticalSliceRunner {
     }
 
     private static void runLocalSearch(VerticalSliceSolution start, String label,
-            ScoreDirectorFactoryConfig scoreDirectorFactoryConfig, long lsSeconds, boolean nearbySelection)
+            ScoreDirectorFactoryConfig scoreDirectorFactoryConfig, long lsSeconds, boolean nearbySelection,
+            int nearbyPoolSize, long stepCountLimit)
             throws InterruptedException, java.util.concurrent.ExecutionException {
         SolverConfig lsConfig = new SolverConfig();
         lsConfig.setSolutionClass(VerticalSliceSolution.class);
         lsConfig.setEntityClassList(List.of(Schedule.class));
         lsConfig.setScoreDirectorFactoryConfig(scoreDirectorFactoryConfig);
         TerminationConfig localSearchTermination = new TerminationConfig();
-        localSearchTermination.setSecondsSpentLimit(lsSeconds);
+        if (stepCountLimit > 0L) {
+            // Borne en nombre de pas : les deux bras executent exactement le meme nombre de
+            // mouvements, donc l'ecart de score mesure la QUALITE PAR MOUVEMENT seule (le
+            // debit sort de l'equation). Exclusif de la borne au temps -- les cumuler
+            // rendrait indeterminable laquelle a coupe.
+            localSearchTermination.setStepCountLimit((int) stepCountLimit);
+        } else {
+            localSearchTermination.setSecondsSpentLimit(lsSeconds);
+        }
         LocalSearchPhaseConfig localSearchPhaseConfig = new LocalSearchPhaseConfig();
         localSearchPhaseConfig.setTerminationConfig(localSearchTermination);
+        String effectiveLabel = nearbySelection ? label + "_p" + nearbyPoolSize : label;
         if (nearbySelection) {
-            localSearchPhaseConfig.setMoveSelectorConfig(buildNearbyMoveSelectorConfig());
+            localSearchPhaseConfig.setMoveSelectorConfig(buildNearbyMoveSelectorConfig(nearbyPoolSize));
         }
         lsConfig.setPhaseConfigList(List.of(localSearchPhaseConfig));
 
@@ -183,7 +211,7 @@ public final class VerticalSliceRunner {
         double meanSpanPerMove = propagationCalls == 0 ? -1.0 : (double) moveSpanTotal / propagationCalls;
         System.out.printf(
                 "ls_done[%s] score=%s ls_seconds=%.2f ls_calculateScore_calls=%d ls_ips=%.1f setup_seconds_before_first_call=%.2f propagation_seconds=%.2f propagation_pct=%.1f propagate_pops=%d pops_per_call=%.1f topological_inversions=%d dirty_pops=%d dirty_per_call=%.1f noop_pop_pct=%.1f propagation_calls=%d mean_span_per_move=%.1f%n",
-                label, lsSolved.getScore(), lsSecondsElapsed, lsCalls, lsIps, setupSeconds, propagationSeconds,
+                effectiveLabel, lsSolved.getScore(), lsSecondsElapsed, lsCalls, lsIps, setupSeconds, propagationSeconds,
                 100.0 * propagationSeconds / lsSecondsElapsed, propagatePops, popsPerCall, inversions,
                 dirtyPops, dirtyPerCall, noopPopPct, propagationCalls, meanSpanPerMove);
     }
@@ -191,14 +219,14 @@ public final class VerticalSliceRunner {
     /**
      * REQ-KKI-007 piste (d) : UnionMoveSelectorConfig(ListChange, ListSwap), tous
      * deux avec une destination/valeur secondaire choisie par NearbySelectionConfig
-     * (PARABOLIC_DISTRIBUTION, taille=50 -- valeur de depart NON balayee, premiere
-     * mesure) au lieu de la selection uniforme sur toute la sequence par defaut
+     * (PARABOLIC_DISTRIBUTION, taille = poolSize, passee en arg[2] du runner pour le
+     * balayage) au lieu de la selection uniforme sur toute la sequence par defaut
      * d'OptaPlanner (mesure : mean_span_per_move ~= N/3 sans ceci, cf. corps
      * REQ-KKI-006/007). OrderPositionNearbyDistanceMeter mesure la distance via
      * xPosition[] LIVE (pas Order.getId(), qui ne suit l'ordre de sequence qu'au
      * tout premier instant naif).
      */
-    private static MoveSelectorConfig buildNearbyMoveSelectorConfig() {
+    private static MoveSelectorConfig buildNearbyMoveSelectorConfig(int poolSize) {
         // mimicSelectorRef obligatoire (verifie empiriquement, IllegalArgumentException
         // sans ceci : "A nearby's original value should always be the same as a value
         // selected earlier in the move") -- l'origine du nearby DOIT pointer par id vers
@@ -208,7 +236,7 @@ public final class VerticalSliceRunner {
         ListChangeMoveSelectorConfig changeConfig = new ListChangeMoveSelectorConfig();
         changeConfig.setValueSelectorConfig(changeValueSelectorConfig);
         DestinationSelectorConfig destinationSelectorConfig = new DestinationSelectorConfig();
-        destinationSelectorConfig.setNearbySelectionConfig(buildNearbySelectionConfig("changeValue"));
+        destinationSelectorConfig.setNearbySelectionConfig(buildNearbySelectionConfig("changeValue", poolSize));
         changeConfig.setDestinationSelectorConfig(destinationSelectorConfig);
 
         ValueSelectorConfig swapValueSelectorConfig = new ValueSelectorConfig();
@@ -216,7 +244,7 @@ public final class VerticalSliceRunner {
         ListSwapMoveSelectorConfig swapConfig = new ListSwapMoveSelectorConfig();
         swapConfig.setValueSelectorConfig(swapValueSelectorConfig);
         ValueSelectorConfig secondaryValueSelectorConfig = new ValueSelectorConfig();
-        secondaryValueSelectorConfig.setNearbySelectionConfig(buildNearbySelectionConfig("swapValue"));
+        secondaryValueSelectorConfig.setNearbySelectionConfig(buildNearbySelectionConfig("swapValue", poolSize));
         swapConfig.setSecondaryValueSelectorConfig(secondaryValueSelectorConfig);
 
         List<MoveSelectorConfig> moveSelectorConfigList = new ArrayList<>();
@@ -227,14 +255,14 @@ public final class VerticalSliceRunner {
         return unionConfig;
     }
 
-    private static NearbySelectionConfig buildNearbySelectionConfig(String mimicSelectorRef) {
+    private static NearbySelectionConfig buildNearbySelectionConfig(String mimicSelectorRef, int poolSize) {
         ValueSelectorConfig originValueSelectorConfig = new ValueSelectorConfig();
         originValueSelectorConfig.setMimicSelectorRef(mimicSelectorRef);
         NearbySelectionConfig nearbySelectionConfig = new NearbySelectionConfig();
         nearbySelectionConfig.setOriginValueSelectorConfig(originValueSelectorConfig);
         nearbySelectionConfig.setNearbyDistanceMeterClass(OrderPositionNearbyDistanceMeter.class);
         nearbySelectionConfig.setNearbySelectionDistributionType(NearbySelectionDistributionType.PARABOLIC_DISTRIBUTION);
-        nearbySelectionConfig.setParabolicDistributionSizeMaximum(50);
+        nearbySelectionConfig.setParabolicDistributionSizeMaximum(poolSize);
         return nearbySelectionConfig;
     }
 }
