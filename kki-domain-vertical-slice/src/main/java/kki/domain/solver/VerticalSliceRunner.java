@@ -2,7 +2,10 @@ package kki.domain.solver;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 
+import org.optaplanner.core.api.score.buildin.hardsoftlong.HardSoftLongScore;
 import org.optaplanner.core.api.solver.SolverManager;
 import org.optaplanner.core.config.constructionheuristic.ConstructionHeuristicPhaseConfig;
 import org.optaplanner.core.config.heuristic.selector.common.nearby.NearbySelectionConfig;
@@ -90,6 +93,11 @@ public final class VerticalSliceRunner {
         // Sert a comparer deux bras a nombre de mouvements egal : separe "qualite par
         // mouvement" de "mouvements par seconde" dans score(T) = produit des deux.
         long stepCountLimit = args.length > 4 ? Long.parseLong(args[4]) : 0L;
+        // arg[5] = periode d'echantillonnage en secondes (0 = pas d'echantillonnage,
+        // defaut). Trace le COUT du meilleur plan connu et l'IPS de l'intervalle a chaque
+        // tick : une valeur de fin de run seule ne dit pas si la recherche progresse
+        // encore ou si elle stagne.
+        long sampleSeconds = args.length > 5 ? Long.parseLong(args[5]) : 0L;
         VerticalSliceSolution unsolved = SyntheticDataGenerator.generate(orderCount, MACHINE_COUNT, 42L);
         System.out.printf("generated orders=%d operations=%d machines=%d%n",
                 unsolved.getOrderList().size(), unsolved.getOperationList().size(), unsolved.getMachineList().size());
@@ -105,7 +113,7 @@ public final class VerticalSliceRunner {
         VerticalSliceSolution naiveStart = new VerticalSliceSolution(
                 unsolved.getOrderList(), unsolved.getOperationList(), unsolved.getMachineList(), List.of(naiveSchedule));
         runLocalSearch(naiveStart, "naive", scoreDirectorFactoryConfig, naiveLsSeconds, false,
-                nearbyPoolSize, stepCountLimit);
+                nearbyPoolSize, stepCountLimit, sampleSeconds);
 
         // REQ-KKI-007 piste (d) : meme depart naif, meme budget, SEULE la selection de
         // mouvement change (nearby au lieu d'uniforme sur toute la sequence) --
@@ -113,8 +121,12 @@ public final class VerticalSliceRunner {
         // mean_span_per_move doit chuter nettement (sinon la config est inerte, pas
         // "sans effet" -- verifier avant d'interpreter ls_ips/score, cf. corps
         // REQ-KKI-006/007).
-        runLocalSearch(naiveStart, "naive_nearby", scoreDirectorFactoryConfig, naiveLsSeconds, true,
-                nearbyPoolSize, stepCountLimit);
+        // poolSize=0 : bras nearby SAUTE. Piste (d) fermee negative (REQ-KKI-007), le
+        // rejouer coute un budget complet pour un resultat deja tranche.
+        if (nearbyPoolSize > 0) {
+            runLocalSearch(naiveStart, "naive_nearby", scoreDirectorFactoryConfig, naiveLsSeconds, true,
+                    nearbyPoolSize, stepCountLimit, sampleSeconds);
+        }
 
         // REQ-KKI-008 : pops_per_call sur un départ CH réel (structuré) vs le départ
         // naïf ci-dessus (ordre de génération, dépendances non structurées) — décide si
@@ -125,7 +137,7 @@ public final class VerticalSliceRunner {
         if (chSolved != null
                 && chSolved.getScheduleList().get(0).getOrderSequence().size() == chSolved.getOrderList().size()) {
             runLocalSearch(chSolved, "ch_start", scoreDirectorFactoryConfig, LOCAL_SEARCH_SECONDS, false,
-                    nearbyPoolSize, stepCountLimit);
+                    nearbyPoolSize, stepCountLimit, sampleSeconds);
         }
     }
 
@@ -157,7 +169,7 @@ public final class VerticalSliceRunner {
 
     private static void runLocalSearch(VerticalSliceSolution start, String label,
             ScoreDirectorFactoryConfig scoreDirectorFactoryConfig, long lsSeconds, boolean nearbySelection,
-            int nearbyPoolSize, long stepCountLimit)
+            int nearbyPoolSize, long stepCountLimit, long sampleSeconds)
             throws InterruptedException, java.util.concurrent.ExecutionException {
         SolverConfig lsConfig = new SolverConfig();
         lsConfig.setSolutionClass(VerticalSliceSolution.class);
@@ -189,12 +201,28 @@ public final class VerticalSliceRunner {
         VerticalSliceIncrementalScoreCalculator.PROPAGATE_DIRTY_POPS.set(0L);
         VerticalSliceIncrementalScoreCalculator.MOVE_SPAN_TOTAL.set(0L);
         VerticalSliceIncrementalScoreCalculator.PROPAGATION_CALLS.set(0L);
+        // Cout du MEILLEUR plan connu a l'instant t : alimente par solveAndListen (appele a
+        // chaque amelioration du best), lu par l'echantillonneur. Long.MIN_VALUE = aucun
+        // best encore publie.
+        AtomicLong latestBestSoft = new AtomicLong(Long.MIN_VALUE);
+        List<String> samples = new CopyOnWriteArrayList<>();
         long lsStartNanos = System.nanoTime();
+        Thread sampler = startSampler(sampleSeconds, lsStartNanos, effectiveLabel, latestBestSoft, samples);
         VerticalSliceSolution lsSolved;
         try (SolverManager<VerticalSliceSolution, Long> lsManager = SolverManager.create(lsConfig)) {
-            lsSolved = lsManager.solve(2L, start).getFinalBestSolution();
+            lsSolved = lsManager.solveAndListen(2L, id -> start, best -> {
+                HardSoftLongScore bestScore = best.getScore();
+                if (bestScore != null) {
+                    latestBestSoft.set(bestScore.getSoftScore());
+                }
+            }).getFinalBestSolution();
         }
         double lsSecondsElapsed = (System.nanoTime() - lsStartNanos) / 1_000_000_000.0;
+        if (sampler != null) {
+            sampler.interrupt();
+            sampler.join(1000L);
+        }
+        samples.forEach(System.out::println);
         long lsCalls = VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.get();
         double lsIps = lsCalls / lsSecondsElapsed;
         long firstCallNanos = VerticalSliceIncrementalScoreCalculator.FIRST_CALL_NANOS.get();
@@ -253,6 +281,47 @@ public final class VerticalSliceRunner {
         UnionMoveSelectorConfig unionConfig = new UnionMoveSelectorConfig();
         unionConfig.setMoveSelectorList(moveSelectorConfigList);
         return unionConfig;
+    }
+
+    /**
+     * Echantillonneur : toutes les {@code sampleSeconds}, releve le COUT du meilleur plan
+     * connu a cet instant et l'IPS de l'intervalle ecoule. Une valeur de fin de run seule
+     * ne distingue pas une recherche qui progresse encore d'une recherche qui stagne
+     * depuis plusieurs minutes -- c'est exactement la question posee par un budget long.
+     * Thread demon, interrompu a la fin du solve ; les releves sont imprimes apres coup
+     * pour ne pas s'entrelacer avec la sortie du solveur.
+     */
+    private static Thread startSampler(long sampleSeconds, long startNanos, String label,
+            AtomicLong latestBestSoft, List<String> samples) {
+        if (sampleSeconds <= 0L) {
+            return null;
+        }
+        Thread sampler = new Thread(() -> {
+            long previousCalls = 0L;
+            double previousElapsed = 0.0;
+            try {
+                for (int tick = 1;; tick++) {
+                    long waitNanos = startNanos + tick * sampleSeconds * 1_000_000_000L - System.nanoTime();
+                    if (waitNanos > 0L) {
+                        Thread.sleep(waitNanos / 1_000_000L, (int) (waitNanos % 1_000_000L));
+                    }
+                    double elapsed = (System.nanoTime() - startNanos) / 1_000_000_000.0;
+                    long calls = VerticalSliceIncrementalScoreCalculator.CALCULATE_SCORE_CALLS.get();
+                    long best = latestBestSoft.get();
+                    samples.add(String.format(
+                            "sample[%s] t=%.0fs cost=%s ips_interval=%.1f ips_cumul=%.1f calls=%d",
+                            label, elapsed, best == Long.MIN_VALUE ? "n/a" : Long.toString(-best),
+                            (calls - previousCalls) / (elapsed - previousElapsed), calls / elapsed, calls));
+                    previousCalls = calls;
+                    previousElapsed = elapsed;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        sampler.setDaemon(true);
+        sampler.start();
+        return sampler;
     }
 
     private static NearbySelectionConfig buildNearbySelectionConfig(String mimicSelectorRef, int poolSize) {
