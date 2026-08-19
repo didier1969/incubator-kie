@@ -43,11 +43,17 @@ public final class FullRunner {
         /** M3 — mêmes échanges, mais guidés vers les arcs disjonctifs tendus. */
         M3,
         /**
-         * M4 — M3, coupé en deux par une phase de réaffectation de ressource. C'est le CÂBLAGE
-         * des mouvements (4) à (7) de CPT-KKI-010, que DEC-KKI-004 interdit d'exprimer comme des
-         * variables de planification.
+         * M4 — M3, coupé en deux par une phase de réaffectation de ressource. Le second mouvement
+         * y est exécuté UNE fois, avec un budget d'essais fixe : mesuré, 300 réaffectations
+         * contre 825 820 échanges.
          */
-        M4
+        M4,
+        /**
+         * M5 — les DEUX mouvements du paradigme dans la même boucle, tirés en alternance et
+         * évalués au même titre. C'est ce que l'opérateur a spécifié dès le départ ; M3 et M4 sont
+         * conservés pour que la comparaison tranche, et non une conviction.
+         */
+        M5
     }
 
     public static void main(String[] args) throws Exception {
@@ -56,6 +62,9 @@ public final class FullRunner {
         Variant variant = args.length > 2 ? Variant.valueOf(args[2]) : Variant.M3;
         if (args.length > 3) {
             FullDataGenerator.levelDemandSkew = Double.parseDouble(args[3]);
+        }
+        if (args.length > 5) {
+            reassignmentShare = Double.parseDouble(args[5]);
         }
         if (args.length > 4) {
             // Pour isoler un effet d'un autre : deux changements dans un même commit ne se
@@ -102,6 +111,8 @@ public final class FullRunner {
         solverConfig.setScoreDirectorFactoryConfig(scoreDirectorFactoryConfig);
         solverConfig.setPhaseConfigList(phasesOf(variant, seconds));
 
+        CriticalPairMoveIteratorFactory.SWAPS_EMITTED.set(0L);
+        CriticalPairMoveIteratorFactory.REASSIGNMENTS_EMITTED.set(0L);
         FullScoreCalculator.CALCULATE_SCORE_CALLS.set(0L);
         FullScoreCalculator.DIRTY_OPERATIONS.set(0L);
         FullScoreCalculator.ORDER_COMPLETION_CHANGES.set(0L);
@@ -161,6 +172,12 @@ public final class FullRunner {
                     ResourceReassignmentPhaseCommand.attempts,
                     ResourceReassignmentPhaseCommand.ACCEPTED_LAST_RUN);
         }
+        // Les DEUX mouvements sont-ils réellement tirés ? Sans ce compte, un second mouvement
+        // câblé mais jamais émis se lirait comme un second mouvement exercé.
+        System.out.printf("moves_emitted swaps=%d reassignments=%d reassignment_share=%.2f%n",
+                CriticalPairMoveIteratorFactory.SWAPS_EMITTED.get(),
+                CriticalPairMoveIteratorFactory.REASSIGNMENTS_EMITTED.get(),
+                variant == Variant.M5 ? reassignmentShare : 0.0);
     }
 
     /**
@@ -192,8 +209,9 @@ public final class FullRunner {
         LocalSearchPhaseConfig localSearch = new LocalSearchPhaseConfig();
         localSearch.setTerminationConfig(termination);
         localSearch.setMoveSelectorConfig(switch (variant) {
-            case M1 -> swapSelector(false);
-            default -> swapSelector(true);
+            case M1 -> selector(false, 0.0);
+            case M5 -> selector(true, reassignmentShare);
+            default -> selector(true, 0.0);
         });
         return localSearch;
     }
@@ -204,11 +222,16 @@ public final class FullRunner {
      * laquelle il s'applique — mais surtout, comparer M1 et M3 exige que seul le CHOIX de la
      * paire diffère, pas la mécanique du mouvement.
      */
-    private static MoveSelectorConfig<?> swapSelector(boolean guided) {
+    private static MoveSelectorConfig<?> selector(boolean guided, double reassignmentShare) {
         MoveIteratorFactoryConfig config = new MoveIteratorFactoryConfig();
         config.setMoveIteratorFactoryClass(CriticalPairMoveIteratorFactory.class);
-        config.setMoveIteratorFactoryCustomProperties(Map.of("guided", Boolean.toString(guided)));
+        config.setMoveIteratorFactoryCustomProperties(Map.of(
+                "guided", Boolean.toString(guided),
+                "reassignmentShare", Double.toString(reassignmentShare)));
         return config;
     }
+
+    /** Part du budget de tirage donnée au second mouvement. Dimension du banc, balayable. */
+    public static double reassignmentShare = 0.5;
 
 }

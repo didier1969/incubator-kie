@@ -16,11 +16,17 @@ import org.optaplanner.core.api.score.buildin.hardsoftlong.HardSoftLongScore;
  * quadratiques.
  *
  * <p>
+ * Le clonage passe par {@link JobShopSolutionCloner} et non par le cloner par défaut : ce dernier
+ * ne clone pas les FAITS, or l'affectation d'une opération à un poste — que le second mouvement
+ * du paradigme change en permanence — vit dans un fait. Sans cela, la meilleure solution mémorisée
+ * continue de muter sous elle et le solveur annonce le score d'un plan en en rendant un autre.
+ *
+ * <p>
  * Le score est {@code hard/soft} et les deux composantes ont un sens distinct : le <b>dur</b>
  * porte les violations de gel dur — un ordre démarré qu'on déplace n'est pas un surcoût, c'est
  * une faute ; le <b>souple</b> porte tout le reste, en centimes.
  */
-@PlanningSolution
+@PlanningSolution(solutionCloner = JobShopSolutionCloner.class)
 public class JobShopSolution {
 
     @ProblemFactCollectionProperty

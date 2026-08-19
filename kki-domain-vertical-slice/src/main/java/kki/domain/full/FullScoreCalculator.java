@@ -994,6 +994,84 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         return solution;
     }
 
+    /**
+     * Une réaffectation candidate : cette opération, vers ce poste.
+     *
+     * @param operation opération prise sur un poste chargé
+     * @param target    poste compatible moins chargé
+     */
+    public record Reassignment(Operation operation, Machine target) {
+    }
+
+    /**
+     * Tire une réaffectation qui a une chance de rééquilibrer — le SECOND mouvement du paradigme.
+     *
+     * <p>
+     * Symétrique de {@link #sampleTightAdjacentPair} : sans guidage, un tirage uniforme sur
+     * 18 486 opérations et 1000 postes désigne presque toujours un déplacement sans intérêt, et
+     * l'évaluation est payée pour rien. On cherche donc une opération sur un poste CHARGÉ et une
+     * cible compatible MOINS chargée.
+     *
+     * <p>
+     * <b>Le proxy de charge est le span du poste</b> — la date de fin de sa dernière opération.
+     * Il est déjà calculé, ne demande aucun état supplémentaire sur le chemin chaud, et c'est
+     * exactement la grandeur qui compte ici : un poste dont le span dépasse l'horizon est celui
+     * qui retient tout le plan. Une charge nominale exacte serait plus juste mais coûterait un
+     * parcours complet à chaque tirage, c'est-à-dire le débit que ce guidage sert à préserver.
+     */
+    public Reassignment sampleOverloadedReassignment(Random random) {
+        int machineCount = operationsByMachine.length;
+        int busiest = -1;
+        long busiestSpan = Long.MIN_VALUE;
+        for (int probe = 0; probe < 6; probe++) {
+            int candidate = random.nextInt(machineCount);
+            List<Operation> queue = operationsByMachine[candidate];
+            if (queue.isEmpty()) {
+                continue;
+            }
+            long span = opEnd[(int) queue.get(queue.size() - 1).getId()];
+            if (span > busiestSpan) {
+                busiestSpan = span;
+                busiest = candidate;
+            }
+        }
+        if (busiest < 0) {
+            return null;
+        }
+        List<Operation> queue = operationsByMachine[busiest];
+        Operation op = queue.get(random.nextInt(queue.size()));
+        if (op.getOrder().getFreezeLevel() == Order.FreezeLevel.HARD) {
+            return null;
+        }
+
+        List<Machine> candidates = op.getCompatibleMachines();
+        if (candidates.size() < 2) {
+            return null;
+        }
+        Machine best = null;
+        long bestSpan = Long.MAX_VALUE;
+        for (int probe = 0; probe < 6; probe++) {
+            Machine candidate = candidates.get(random.nextInt(candidates.size()));
+            if (candidate == op.getMachine()) {
+                continue;
+            }
+            List<Operation> targetQueue = operationsByMachine[(int) candidate.getId()];
+            long span = targetQueue.isEmpty()
+                    ? origin
+                    : opEnd[(int) targetQueue.get(targetQueue.size() - 1).getId()];
+            if (span < bestSpan) {
+                bestSpan = span;
+                best = candidate;
+            }
+        }
+        // Ne proposer que si la cible est RÉELLEMENT moins chargée : sinon le mouvement ne peut
+        // qu'aggraver, et le proposer revient à dépenser une évaluation pour un refus certain.
+        if (best == null || bestSpan >= busiestSpan) {
+            return null;
+        }
+        return new Reassignment(op, best);
+    }
+
     public int positionOf(Order order) {
         return xPosition[(int) order.getId()];
     }

@@ -5,10 +5,17 @@ import java.util.NoSuchElementException;
 import java.util.Random;
 
 import org.optaplanner.core.api.score.director.ScoreDirector;
+import org.optaplanner.core.impl.heuristic.move.Move;
 import org.optaplanner.core.impl.heuristic.selector.move.factory.MoveIteratorFactory;
 
 /**
- * M3 — n'émet que les échanges susceptibles d'améliorer quelque chose.
+ * Le sélecteur des DEUX mouvements du paradigme — échange de position X, et déplacement d'une
+ * opération vers un autre workcenter compatible.
+ *
+ * <p>
+ * Il n'en émettait qu'un. Le second avait été relégué dans une phase exécutée une seule fois, et
+ * le rapport mesuré atteignait 2 750 contre 1 : la moitié du jeu de mouvements était absente de
+ * la recherche.
  *
  * <p>
  * Le sélecteur uniforme d'OptaPlanner tire deux positions au hasard parmi 5000 : la quasi-totalité
@@ -28,7 +35,7 @@ import org.optaplanner.core.impl.heuristic.selector.move.factory.MoveIteratorFac
  * l'instant.
  */
 public final class CriticalPairMoveIteratorFactory
-        implements MoveIteratorFactory<JobShopSolution, CriticalPairSwapMove> {
+        implements MoveIteratorFactory<JobShopSolution, Move<JobShopSolution>> {
 
     /**
      * Bornes de la recherche d'une paire utile. Au-delà, on rend un mouvement quelconque plutôt
@@ -49,13 +56,35 @@ public final class CriticalPairMoveIteratorFactory
         this.guided = Boolean.parseBoolean(guided);
     }
 
+    /**
+     * Part des tirages consacrée au SECOND mouvement — le déplacement d'une opération vers un
+     * autre workcenter compatible. Zéro le désactive, ce qui redonne exactement le comportement
+     * mesuré jusqu'ici : huit cent mille échanges de position et rien d'autre.
+     *
+     * <p>
+     * C'est une dimension du banc au sens de `DEC-KKI-005`, donc à balayer et jamais à deviner.
+     * La valeur par défaut partage le budget également entre les deux mouvements que le paradigme
+     * autorise, faute d'une mesure qui dise autre chose.
+     */
+    private double reassignmentShare = 0.5;
+
+    public void setReassignmentShare(String reassignmentShare) {
+        this.reassignmentShare = Double.parseDouble(reassignmentShare);
+    }
+
+    /** Comptés pour que la mesure puisse dire si les DEUX mouvements sont réellement tirés. */
+    public static final java.util.concurrent.atomic.AtomicLong SWAPS_EMITTED =
+            new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong REASSIGNMENTS_EMITTED =
+            new java.util.concurrent.atomic.AtomicLong();
+
     @Override
     public long getSize(ScoreDirector<JobShopSolution> scoreDirector) {
         return scoreDirector.getWorkingSolution().getOrderList().size();
     }
 
     @Override
-    public Iterator<CriticalPairSwapMove> createOriginalMoveIterator(
+    public Iterator<Move<JobShopSolution>> createOriginalMoveIterator(
             ScoreDirector<JobShopSolution> scoreDirector) {
         throw new UnsupportedOperationException(
                 "M3 est un sélecteur aléatoire guidé : l'énumération exhaustive des paires tendues"
@@ -63,7 +92,7 @@ public final class CriticalPairMoveIteratorFactory
     }
 
     @Override
-    public Iterator<CriticalPairSwapMove> createRandomMoveIterator(
+    public Iterator<Move<JobShopSolution>> createRandomMoveIterator(
             ScoreDirector<JobShopSolution> scoreDirector, Random workingRandom) {
         Schedule schedule = scoreDirector.getWorkingSolution().getScheduleList().get(0);
         int orderCount = schedule.getOrderSequence().size();
@@ -75,17 +104,44 @@ public final class CriticalPairMoveIteratorFactory
             }
 
             @Override
-            public CriticalPairSwapMove next() {
+            public Move<JobShopSolution> next() {
                 FullScoreCalculator live = FullScoreCalculator.LIVE;
                 if (live == null) {
                     throw new NoSuchElementException("aucun calculateur vivant");
                 }
+                if (workingRandom.nextDouble() < reassignmentShare) {
+                    Move<JobShopSolution> reassignment = nextReassignment(live, workingRandom);
+                    if (reassignment != null) {
+                        return reassignment;
+                    }
+                    // Aucune réaffectation utile trouvée : on retombe sur l'échange plutôt que
+                    // de rendre un itérateur tari, qui se lirait comme une convergence.
+                }
+                SWAPS_EMITTED.incrementAndGet();
+                return nextSwap(live, workingRandom);
+            }
+
+            private Move<JobShopSolution> nextReassignment(FullScoreCalculator live,
+                    Random random) {
+                for (int attempt = 0; attempt < SAMPLING_ATTEMPTS; attempt++) {
+                    FullScoreCalculator.Reassignment candidate =
+                            live.sampleOverloadedReassignment(random);
+                    if (candidate != null) {
+                        REASSIGNMENTS_EMITTED.incrementAndGet();
+                        return new WorkcenterReassignmentMove(schedule, candidate.operation(),
+                                candidate.target());
+                    }
+                }
+                return null;
+            }
+
+            private Move<JobShopSolution> nextSwap(FullScoreCalculator live, Random random) {
                 if (!guided) {
                     return new CriticalPairSwapMove(schedule,
-                            workingRandom.nextInt(orderCount), workingRandom.nextInt(orderCount));
+                            random.nextInt(orderCount), random.nextInt(orderCount));
                 }
                 for (int attempt = 0; attempt < SAMPLING_ATTEMPTS; attempt++) {
-                    Order[] pair = live.sampleTightAdjacentPair(workingRandom);
+                    Order[] pair = live.sampleTightAdjacentPair(random);
                     if (pair != null) {
                         int left = live.positionOf(pair[0]);
                         int right = live.positionOf(pair[1]);
@@ -94,10 +150,9 @@ public final class CriticalPairMoveIteratorFactory
                         }
                     }
                 }
-                // Repli assumé : plutôt un échange quelconque qu'un itérateur tari, qui se
-                // lirait comme une convergence.
+                // Repli assumé, même raison.
                 return new CriticalPairSwapMove(schedule,
-                        workingRandom.nextInt(orderCount), workingRandom.nextInt(orderCount));
+                        random.nextInt(orderCount), random.nextInt(orderCount));
             }
         };
     }
