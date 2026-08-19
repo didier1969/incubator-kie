@@ -2,6 +2,7 @@ package kki.domain.full;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -47,16 +48,49 @@ class MoveSetTest {
                 calculator.beforeListVariableChanged(null, "orderSequence", from, to);
                 Collections.swap(sequence, a, b);
                 calculator.afterListVariableChanged(null, "orderSequence", from, to);
-            } else {
+            } else if (random.nextBoolean()) {
                 Operation op = operations.get(random.nextInt(operations.size()));
                 List<Machine> candidates = op.getCompatibleMachines();
-                Machine target = candidates.get(random.nextInt(candidates.size()));
-                calculator.beforeVariableChanged(op, "machine");
-                op.setMachine(target);
-                calculator.afterVariableChanged(op, "machine");
+                calculator.reassignMachine(op, candidates.get(random.nextInt(candidates.size())));
+            } else {
+                // Réaffectation de metteur : la troisième famille de prédécesseurs. Un
+                // différentiel qui ne ferait que des échanges X et des changements de machine
+                // laisserait la file du metteur sans filet.
+                Operation op = operations.get(random.nextInt(operations.size()));
+                List<Setter> competent = solution.getSetterList().stream()
+                        .filter(s -> s.canSetUp(op.getMachine()))
+                        .toList();
+                calculator.reassignSetter(op, competent.get(random.nextInt(competent.size())));
             }
             assertEquals(calculator.fullSweepScore(), calculator.calculateScore(),
                     "divergence au mouvement " + move);
+        }
+    }
+
+    @Test
+    void reassigningToAnIncompetentSetterIsRefused() {
+        // La compétence n'est pas une préférence : un metteur qui ne sait pas régler cette
+        // machine ne doit pas pouvoir être affecté, même par un appelant qui insiste.
+        JobShopSolution solution = FullDataGenerator.generate(120, 61L);
+        FullScoreCalculator calculator = new FullScoreCalculator();
+        calculator.resetWorkingSolution(solution);
+        Operation op = solution.getOperationList().get(0);
+        Setter incompetent = solution.getSetterList().stream()
+                .filter(s -> !s.canSetUp(op.getMachine()))
+                .findFirst()
+                .orElseThrow();
+        assertThrows(IllegalArgumentException.class,
+                () -> calculator.reassignSetter(op, incompetent),
+                "un metteur sans la compétence doit être refusé, pas facturé");
+    }
+
+    @Test
+    void everyOperationHasACompetentSetter() {
+        JobShopSolution solution = FullDataGenerator.generate(400, 67L);
+        for (Operation op : solution.getOperationList()) {
+            assertTrue(op.getSetter().canSetUp(op.getMachine()),
+                    op + " est confiée à " + op.getSetter() + ", qui ne sait pas régler "
+                            + op.getMachine());
         }
     }
 

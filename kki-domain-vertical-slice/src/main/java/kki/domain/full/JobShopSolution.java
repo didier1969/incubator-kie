@@ -36,6 +36,9 @@ public class JobShopSolution {
     @ProblemFactCollectionProperty
     private List<Machine> machineList;
 
+    @ProblemFactCollectionProperty
+    private List<Setter> setterList;
+
     @PlanningEntityCollectionProperty
     private List<Schedule> scheduleList;
 
@@ -49,11 +52,12 @@ public class JobShopSolution {
     }
 
     public JobShopSolution(List<Order> orderList, List<Operation> operationList,
-            List<Machine> machineList, List<Schedule> scheduleList, SetupMatrix setupMatrix,
-            long originEpochSec) {
+            List<Machine> machineList, List<Setter> setterList, List<Schedule> scheduleList,
+            SetupMatrix setupMatrix, long originEpochSec) {
         this.orderList = orderList;
         this.operationList = operationList;
         this.machineList = machineList;
+        this.setterList = setterList;
         this.scheduleList = scheduleList;
         this.setupMatrix = setupMatrix;
         this.originEpochSec = originEpochSec;
@@ -69,6 +73,10 @@ public class JobShopSolution {
 
     public List<Machine> getMachineList() {
         return machineList;
+    }
+
+    public List<Setter> getSetterList() {
+        return setterList;
     }
 
     public List<Schedule> getScheduleList() {

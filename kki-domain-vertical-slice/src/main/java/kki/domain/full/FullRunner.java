@@ -47,9 +47,10 @@ public final class FullRunner {
         }
 
         JobShopSolution problem = FullDataGenerator.generate(orderCount, 42L);
-        System.out.printf("full_instance orders=%d operations=%d machines=%d level_skew=%.1f%n",
+        System.out.printf("full_instance orders=%d operations=%d machines=%d setters=%d level_skew=%.1f%n",
                 problem.getOrderList().size(), problem.getOperationList().size(),
-                problem.getMachineList().size(), FullDataGenerator.levelDemandSkew);
+                problem.getMachineList().size(), problem.getSetterList().size(),
+                FullDataGenerator.levelDemandSkew);
 
         FullScoreCalculator oracle = new FullScoreCalculator();
         oracle.resetWorkingSolution(problem);
@@ -66,7 +67,7 @@ public final class FullRunner {
         System.out.printf("full_baseline random_order_chf=%.0f earliest_due_date_chf=%.0f edd_gain_pct=%.2f%n",
                 randomOrderCost / 100.0, startCost / 100.0,
                 100.0 * (randomOrderCost - startCost) / (double) randomOrderCost);
-        System.out.print(oracle.costBreakdown().describe("depart"));
+        System.out.print(oracle.coldSweep().describe("depart"));
         System.out.print(oracle.latenessProfile("depart"));
 
         ScoreDirectorFactoryConfig scoreDirectorFactoryConfig = new ScoreDirectorFactoryConfig();
@@ -97,7 +98,7 @@ public final class FullRunner {
         double elapsed = (System.nanoTime() - startNanos) / 1_000_000_000.0;
 
         oracle.resetWorkingSolution(solved);
-        System.out.print(oracle.costBreakdown().describe("arrivee"));
+        System.out.print(oracle.coldSweep().describe("arrivee"));
 
         long endCost = -solved.getScore().getSoftScore();
         long calls = FullScoreCalculator.CALCULATE_SCORE_CALLS.get();

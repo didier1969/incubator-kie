@@ -44,6 +44,14 @@ public final class FullDataGenerator {
 
     /** Exposant de la loi sur le niveau technologique requis. 2 = les articles simples dominent. */
     public static double levelDemandSkew = 2.0;
+    /** Nombre de metteurs en train. Dimension du domaine, balayée — jamais devinée. */
+    public static int setterCount = 40;
+    /** Nombre de technologies que chaque metteur sait régler. 1 = spécialiste, 5 = polyvalent. */
+    public static int setterSkillBreadth = 2;
+    /** Part des machines qui ne tournent PAS en continu (CPT-KKI-007 : « peut » tourner 24/7). */
+    public static double nonContinuousMachineShare = 0.3;
+    /** Nombre moyen de fenêtres de maintenance par machine sur l'horizon. */
+    public static double maintenanceWindowsPerMachine = 1.5;
 
     public static JobShopSolution generate(int orderCount, long seed) {
         Random random = new Random(seed);
@@ -55,10 +63,35 @@ public final class FullDataGenerator {
                 for (int k = 0; k < MACHINES_PER_LEVEL; k++) {
                     long id = machines.size();
                     // 60 CHF/h en bas d'échelle, +10 par palier, 150 en haut.
-                    machines.add(new Machine(id, technology, level, 6_000L + 1_000L * level));
+                    machines.add(new Machine(id, technology, level, 6_000L + 1_000L * level,
+                            machineCalendarOf(random)));
                 }
             }
         }
+
+        // Les metteurs sont des ressources comme les autres : calendrier propre, et compétences.
+        // Les technologies sont attribuées en rotation, ce qui garantit qu'aucune ne se retrouve
+        // sans personne pour la régler — une couverture trouée rendrait l'instance infaisable
+        // pour une raison qui n'a rien à voir avec l'ordonnancement.
+        List<Setter> setters = new ArrayList<>(setterCount);
+        for (int i = 0; i < setterCount; i++) {
+            boolean[] mastered = new boolean[TECHNOLOGIES];
+            for (int b = 0; b < Math.min(setterSkillBreadth, TECHNOLOGIES); b++) {
+                mastered[(i + b) % TECHNOLOGIES] = true;
+            }
+            setters.add(new Setter(i, setterCalendarOf(random), mastered));
+        }
+        List<List<Setter>> settersByTechnology = new ArrayList<>(TECHNOLOGIES);
+        for (int technology = 0; technology < TECHNOLOGIES; technology++) {
+            List<Setter> competent = new ArrayList<>();
+            for (Setter setter : setters) {
+                if (setter.canSetUp(machines.get(technology * LEVELS * MACHINES_PER_LEVEL))) {
+                    competent.add(setter);
+                }
+            }
+            settersByTechnology.add(competent);
+        }
+        int[] nextSetterOfTechnology = new int[TECHNOLOGIES];
 
         // MÉMOÏSATION — la plage de valeurs de M2 ne dépend que du couple (technologie, niveau) :
         // 50 listes partagées par les 17 515 opérations, construites une fois. Compatibilité
@@ -111,10 +144,15 @@ public final class FullDataGenerator {
                     visited.add(machineId);
                 }
                 int setupKey = setupMatrix.keyOf(articleId, pass);
+                // Un metteur COMPÉTENT pour cette machine, distribué en rotation pour ne pas
+                // concentrer artificiellement la charge sur le premier de la liste.
+                List<Setter> competent = settersByTechnology.get(technology);
+                Setter setter = competent.get(
+                        nextSetterOfTechnology[technology]++ % competent.size());
                 chain.add(new Operation(operationId++, order, pass, duration,
                         technology, requiredLevel, setupKey,
                         compatibleByTechAndLevel.get(technology).get(requiredLevel),
-                        machines.get((int) machineId)));
+                        machines.get((int) machineId), setter));
             }
             order.setOperations(chain);
             operations.addAll(chain);
@@ -123,8 +161,47 @@ public final class FullDataGenerator {
 
         Schedule schedule = new Schedule();
         schedule.setOrderSequence(new ArrayList<>(orders));
-        return new JobShopSolution(orders, operations, machines, List.of(schedule), setupMatrix,
-                ORIGIN_EPOCH);
+        return new JobShopSolution(orders, operations, machines, setters, List.of(schedule),
+                setupMatrix, ORIGIN_EPOCH);
+    }
+
+    /**
+     * Calendrier d'une machine : continue, ou en deux équipes du lundi au vendredi. Dans les deux
+     * cas des fenêtres de MAINTENANCE viennent s'y inscrire — ce sont des indisponibilités datées,
+     * pas un mécanisme à part (CPT-KKI-004, 4e cas).
+     */
+    private static WorkCalendar machineCalendarOf(Random random) {
+        WorkCalendar base = random.nextDouble() < nonContinuousMachineShare
+                ? new WorkCalendar(5, 6L * 3600L, 16L * 3600L, new long[0])
+                : WorkCalendar.CONTINUOUS;
+        return base.withBlackouts(maintenanceWindows(random));
+    }
+
+    /** Arrêts de maintenance : quelques journées entières sur l'horizon, subies. */
+    private static long[] maintenanceWindows(Random random) {
+        int count = (int) Math.floor(maintenanceWindowsPerMachine)
+                + (random.nextDouble() < maintenanceWindowsPerMachine % 1.0 ? 1 : 0);
+        long[] windows = new long[count * 2];
+        long spacing = HORIZON_SECONDS / Math.max(1, count);
+        for (int i = 0; i < count; i++) {
+            long start = i * spacing + (long) (random.nextDouble() * spacing * 0.6);
+            windows[2 * i] = start;
+            windows[2 * i + 1] = start + 24L * 3600L;
+        }
+        return windows;
+    }
+
+    /**
+     * Calendrier d'un metteur : lundi-mercredi 8 h, plus d'éventuelles absences. La maladie de
+     * CPT-KKI-007 ne demande aucun mécanisme dédié — c'est un trou dans SON calendrier.
+     */
+    private static WorkCalendar setterCalendarOf(Random random) {
+        if (random.nextDouble() < 0.15) {
+            long start = (long) (random.nextDouble() * HORIZON_SECONDS * 0.9);
+            return WorkCalendar.MONDAY_TO_WEDNESDAY_8H
+                    .withBlackouts(new long[] { start, start + 5L * 24 * 3600L });
+        }
+        return WorkCalendar.MONDAY_TO_WEDNESDAY_8H;
     }
 
     /**

@@ -37,13 +37,14 @@ public class Operation {
     private List<Machine> compatibleMachines;
 
     private Machine machine;
+    private Setter setter;
 
     public Operation() {
     }
 
     public Operation(long id, Order order, int passIndex, long durationSeconds,
             int requiredTechnology, int requiredLevel, int setupKey,
-            List<Machine> compatibleMachines, Machine machine) {
+            List<Machine> compatibleMachines, Machine machine, Setter setter) {
         this.id = id;
         this.order = order;
         this.passIndex = passIndex;
@@ -53,10 +54,24 @@ public class Operation {
         this.setupKey = setupKey;
         this.compatibleMachines = compatibleMachines;
         this.machine = machine;
+        this.setter = setter;
     }
 
     public List<Machine> getCompatibleMachines() {
         return compatibleMachines;
+    }
+
+    /**
+     * Le metteur qui exécute LA MISE EN TRAIN de cette opération. C'est une décision du domaine
+     * au même titre que la machine : il faut un metteur compétent pour cette machine, et il n'en
+     * fait qu'une à la fois.
+     */
+    public Setter getSetter() {
+        return setter;
+    }
+
+    public void setSetter(Setter setter) {
+        this.setter = setter;
     }
 
     public Machine getMachine() {
@@ -65,6 +80,7 @@ public class Operation {
 
     public void setMachine(Machine machine) {
         this.machine = machine;
+        this.setter = setter;
     }
 
     public long getMachineId() {

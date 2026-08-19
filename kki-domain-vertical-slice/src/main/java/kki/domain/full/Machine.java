@@ -16,12 +16,28 @@ public final class Machine {
     private final int technology;
     private final int level;
     private final long hourlyCostCents;
+    private final WorkCalendar calendar;
 
+    /** Machine sans interruption — le cas « peut tourner 24/7 » de CPT-KKI-007. */
     public Machine(long id, int technology, int level, long hourlyCostCents) {
+        this(id, technology, level, hourlyCostCents, WorkCalendar.CONTINUOUS);
+    }
+
+    public Machine(long id, int technology, int level, long hourlyCostCents, WorkCalendar calendar) {
         this.id = id;
         this.technology = technology;
         this.level = level;
         this.hourlyCostCents = hourlyCostCents;
+        this.calendar = calendar;
+    }
+
+    /**
+     * Le calendrier porte à la fois les heures d'ouverture et les fenêtres de MAINTENANCE — ces
+     * dernières ne sont qu'une indisponibilité datée, ce qui évite un mécanisme dédié pour le
+     * 4e cas de CPT-KKI-004.
+     */
+    public WorkCalendar getCalendar() {
+        return calendar;
     }
 
     public long getId() {
