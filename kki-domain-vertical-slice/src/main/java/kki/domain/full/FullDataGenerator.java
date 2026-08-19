@@ -42,6 +42,9 @@ public final class FullDataGenerator {
     private FullDataGenerator() {
     }
 
+    /** Exposant de la loi sur le niveau technologique requis. 2 = les articles simples dominent. */
+    public static double levelDemandSkew = 2.0;
+
     public static JobShopSolution generate(int orderCount, long seed) {
         Random random = new Random(seed);
         SetupMatrix setupMatrix = new SetupMatrix(ARTICLE_COUNT, MAX_PASSES, seed);
@@ -142,13 +145,13 @@ public final class FullDataGenerator {
     /** Demande en 1/rang² sur l'échelle : les articles simples dominent largement. */
     private static int skewedLevel(Random random) {
         double u = random.nextDouble();
-        double cumulative = 0.0;
         double total = 0.0;
         for (int level = 0; level < LEVELS; level++) {
-            total += 1.0 / ((level + 1.0) * (level + 1.0));
+            total += 1.0 / Math.pow(level + 1.0, levelDemandSkew);
         }
+        double cumulative = 0.0;
         for (int level = 0; level < LEVELS; level++) {
-            cumulative += 1.0 / ((level + 1.0) * (level + 1.0)) / total;
+            cumulative += 1.0 / Math.pow(level + 1.0, levelDemandSkew) / total;
             if (u <= cumulative) {
                 return level;
             }

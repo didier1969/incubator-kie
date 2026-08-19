@@ -42,11 +42,14 @@ public final class FullRunner {
         int orderCount = args.length > 0 ? Integer.parseInt(args[0]) : 5000;
         long seconds = args.length > 1 ? Long.parseLong(args[1]) : 60L;
         Variant variant = args.length > 2 ? Variant.valueOf(args[2]) : Variant.M3;
+        if (args.length > 3) {
+            FullDataGenerator.levelDemandSkew = Double.parseDouble(args[3]);
+        }
 
         JobShopSolution problem = FullDataGenerator.generate(orderCount, 42L);
-        System.out.printf("full_instance orders=%d operations=%d machines=%d%n",
+        System.out.printf("full_instance orders=%d operations=%d machines=%d level_skew=%.1f%n",
                 problem.getOrderList().size(), problem.getOperationList().size(),
-                problem.getMachineList().size());
+                problem.getMachineList().size(), FullDataGenerator.levelDemandSkew);
 
         FullScoreCalculator oracle = new FullScoreCalculator();
         oracle.resetWorkingSolution(problem);
@@ -63,6 +66,8 @@ public final class FullRunner {
         System.out.printf("full_baseline random_order_chf=%.0f earliest_due_date_chf=%.0f edd_gain_pct=%.2f%n",
                 randomOrderCost / 100.0, startCost / 100.0,
                 100.0 * (randomOrderCost - startCost) / (double) randomOrderCost);
+        System.out.print(oracle.costBreakdown().describe("depart"));
+        System.out.print(oracle.latenessProfile("depart"));
 
         ScoreDirectorFactoryConfig scoreDirectorFactoryConfig = new ScoreDirectorFactoryConfig();
         scoreDirectorFactoryConfig.setIncrementalScoreCalculatorClass(FullScoreCalculator.class);
@@ -90,6 +95,9 @@ public final class FullRunner {
             solved = manager.solve(1L, problem).getFinalBestSolution();
         }
         double elapsed = (System.nanoTime() - startNanos) / 1_000_000_000.0;
+
+        oracle.resetWorkingSolution(solved);
+        System.out.print(oracle.costBreakdown().describe("arrivee"));
 
         long endCost = -solved.getScore().getSoftScore();
         long calls = FullScoreCalculator.CALCULATE_SCORE_CALLS.get();

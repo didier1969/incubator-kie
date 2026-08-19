@@ -295,6 +295,119 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         return CostModel.orderCents(order, completion);
     }
 
+    /**
+     * Répartition du coût par terme, en centimes. Sans elle on optimise à l'aveugle : investir
+     * dans la machinerie qui adresse l'avance n'a de sens que si l'avance pèse.
+     */
+    public record CostBreakdown(long setter, long machineIdle, long tardiness, long earliness,
+            long softFreeze) {
+        public long total() {
+            return setter + machineIdle + tardiness + earliness + softFreeze;
+        }
+
+        public String describe(String label) {
+            long total = Math.max(1L, total());
+            return String.format(
+                    "cost_breakdown[%s] total_chf=%.3e setter_chf=%.3e machine_idle_chf=%.3e "
+                            + "tardiness_chf=%.3e earliness_chf=%.3e soft_freeze_chf=%.3e "
+                            + "tardiness_over_physical=%.0f%n",
+                    label, total() / 100.0, setter / 100.0, machineIdle / 100.0,
+                    tardiness / 100.0, earliness / 100.0, softFreeze / 100.0,
+                    (double) tardiness / Math.max(1L, setter + machineIdle));
+        }
+    }
+
+    public CostBreakdown costBreakdown() {
+        int machineCount = solution.getMachineList().size();
+        long[] machineFree = new long[machineCount];
+        int[] lastKeyOnMachine = new int[machineCount];
+        Arrays.fill(machineFree, origin);
+        Arrays.fill(lastKeyOnMachine, -1);
+        long setter = 0L;
+        long idle = 0L;
+        long tardiness = 0L;
+        long earliness = 0L;
+        long softFreeze = 0L;
+
+        for (Order order : schedule.getOrderSequence()) {
+            long chainReadyAt = origin;
+            for (int opId = firstOpIdOf(order); opId >= 0; opId = chainSuccessorId[opId]) {
+                Operation op = opById[opId];
+                int m = (int) op.getMachineId();
+                long setupSeconds = lastKeyOnMachine[m] < 0
+                        ? setupMatrix.coldStartSeconds(op.getSetupKey())
+                        : setupMatrix.secondsBetween(lastKeyOnMachine[m], op.getSetupKey());
+                long setupEnd = SetterCalendar.setupEnd(machineFree[m], setupSeconds);
+                long machineIdle = setupEnd - machineFree[m] - setupSeconds;
+                setter += setupSeconds * CostModel.SETTER_CENTS_PER_HOUR / 3600L;
+                idle += machineIdle * machineHourlyCents[m] / 3600L;
+                long finish = Math.max(setupEnd, chainReadyAt) + op.getDurationSeconds();
+                machineFree[m] = finish;
+                lastKeyOnMachine[m] = op.getSetupKey();
+                chainReadyAt = finish;
+            }
+            long total = CostModel.orderCents(order, chainReadyAt);
+            long freeze = order.getFreezeLevel() == Order.FreezeLevel.SOFT
+                    ? total - CostModel.orderCents(withoutSoftFreeze(order), chainReadyAt)
+                    : 0L;
+            softFreeze += freeze;
+            if (chainReadyAt > order.getDueEpochSec()) {
+                tardiness += total - freeze;
+            } else {
+                earliness += total - freeze;
+            }
+        }
+        return new CostBreakdown(setter, idle, tardiness, earliness, softFreeze);
+    }
+
+    /**
+     * Distribution du retard par ordre, en heures. Sans elle, un terme de retard qui écrase tout
+     * reste ambigu : soit les dates dues sont structurellement inatteignables, soit la forme
+     * quadratique est mal calibrée. Les deux appellent des décisions opposées.
+     */
+    public String latenessProfile(String label) {
+        long[] lateness = new long[solution.getOrderList().size()];
+        int machineCount = solution.getMachineList().size();
+        long[] machineFree = new long[machineCount];
+        int[] lastKeyOnMachine = new int[machineCount];
+        Arrays.fill(machineFree, origin);
+        Arrays.fill(lastKeyOnMachine, -1);
+        int index = 0;
+        int late = 0;
+        for (Order order : schedule.getOrderSequence()) {
+            long chainReadyAt = origin;
+            for (int opId = firstOpIdOf(order); opId >= 0; opId = chainSuccessorId[opId]) {
+                Operation op = opById[opId];
+                int m = (int) op.getMachineId();
+                long setupSeconds = lastKeyOnMachine[m] < 0
+                        ? setupMatrix.coldStartSeconds(op.getSetupKey())
+                        : setupMatrix.secondsBetween(lastKeyOnMachine[m], op.getSetupKey());
+                long setupEnd = SetterCalendar.setupEnd(machineFree[m], setupSeconds);
+                long finish = Math.max(setupEnd, chainReadyAt) + op.getDurationSeconds();
+                machineFree[m] = finish;
+                lastKeyOnMachine[m] = op.getSetupKey();
+                chainReadyAt = finish;
+            }
+            long delta = (chainReadyAt - order.getDueEpochSec()) / 3600L;
+            lateness[index++] = delta;
+            if (delta > 0L) {
+                late++;
+            }
+        }
+        long[] sorted = lateness.clone();
+        Arrays.sort(sorted);
+        return String.format(
+                "lateness[%s] late=%d/%d p10=%dh median=%dh p90=%dh max=%dh%n",
+                label, late, lateness.length, sorted[sorted.length / 10], sorted[sorted.length / 2],
+                sorted[sorted.length * 9 / 10], sorted[sorted.length - 1]);
+    }
+
+    /** Même ordre, palier libre : sert à isoler la part de pénalité de stabilité. */
+    private static Order withoutSoftFreeze(Order order) {
+        return new Order(order.getId(), order.getArticleId(), order.getPriorityWeight(),
+                order.getDueEpochSec(), Order.FreezeLevel.FREE, order.getReferenceCompletionEpochSec());
+    }
+
     /** ORACLE — balayage complet à froid, indépendant de tout état incrémental. */
     public HardSoftLongScore fullSweepScore() {
         int machineCount = solution.getMachineList().size();
