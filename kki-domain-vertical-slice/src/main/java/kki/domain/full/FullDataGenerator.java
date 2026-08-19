@@ -150,6 +150,13 @@ public final class FullDataGenerator {
     public static long hardFreezeHorizonSeconds = 7L * 24 * 3600L;
     /** Part des ordres de cet horizon qui sont effectivement verrouillés durs. */
     public static double hardFreezeShare = 0.5;
+    /**
+     * Marge minimale d'une date due au-dessus du temps de traversée de son ordre. 0 = due au plus
+     * juste, 1 = deux fois le temps de traversée. C'est le curseur entre un carnet tendu et un
+     * carnet confortable, et il décide si le retard mesuré est de l'ordonnancement ou de
+     * l'infaisabilité.
+     */
+    public static double dueSlackFactor = 0.2;
 
     /**
      * Restaure toutes les dimensions à leur valeur de référence.
@@ -190,6 +197,7 @@ public final class FullDataGenerator {
         softFreezeHorizonSeconds = 21L * 24 * 3600L;
         hardFreezeHorizonSeconds = 7L * 24 * 3600L;
         hardFreezeShare = 0.5;
+        dueSlackFactor = 0.2;
     }
 
     public static JobShopSolution generate(int orderCount, long seed) {
@@ -216,8 +224,14 @@ public final class FullDataGenerator {
         // Les technologies sont attribuées en rotation, ce qui garantit qu'aucune ne se retrouve
         // sans personne pour la régler — une couverture trouée rendrait l'instance infaisable
         // pour une raison qui n'a rien à voir avec l'ordonnancement.
-        List<Setter> setters = new ArrayList<>(setterCount);
-        for (int i = 0; i < setterCount; i++) {
+        // PLANCHER DUR, appliqué ici et pas seulement dans reset() : sans au moins un metteur
+        // par technologie, aucune mise en train n'est réalisable sur la technologie découverte,
+        // et le générateur produit une instance silencieusement INFAISABLE — ou lève sur une
+        // liste de compétents vide. Un balayage qui descendrait le paramètre trop bas ferait
+        // alors MENTIR le générateur, pas seulement mal mesurer.
+        int effectiveSetterCount = Math.max(technologies, setterCount);
+        List<Setter> setters = new ArrayList<>(effectiveSetterCount);
+        for (int i = 0; i < effectiveSetterCount; i++) {
             boolean[] mastered = new boolean[technologies];
             for (int b = 0; b < Math.min(setterSkillBreadth, technologies); b++) {
                 mastered[(i + b) % technologies] = true;
@@ -296,8 +310,16 @@ public final class FullDataGenerator {
             int articleId = random.nextInt(articleCount);
             Routing routing = routings.get(articleId);
             int priorityWeight = 1 + random.nextInt(5);
-            long due = ORIGIN_EPOCH + (long) (random.nextDouble() * horizonSeconds);
-            Order.FreezeLevel freeze = freezeLevelOf(due, random);
+            // La date due ne peut pas précéder le temps de traversée de l'ordre : un ordre dû
+            // avant que sa propre gamme puisse être exécutée est en retard quoi que fasse le
+            // système, et mesurer son retard revient à mesurer de l'infaisabilité. On borne donc
+            // par la traversée majorée d'une marge, puis on étale jusqu'à l'horizon.
+            long traversal = traversalSeconds(routing, setupMatrix, articleId);
+            long earliestDue = (long) (traversal * (1.0 + dueSlackFactor));
+            double urgency = random.nextDouble();
+            long due = ORIGIN_EPOCH + earliestDue
+                    + (long) (urgency * Math.max(0L, horizonSeconds - earliestDue));
+            Order.FreezeLevel freeze = freezeLevelOf(urgency, random);
             // Plan de référence : la date due elle-même sert de dernier plan publié — c'est la
             // référence la plus défavorable au solveur, donc la plus honnête pour mesurer.
             Order order = new Order(o, articleId, priorityWeight, due, freeze, due);
@@ -356,6 +378,26 @@ public final class FullDataGenerator {
         schedule.setOrderSequence(new ArrayList<>(orders));
         return new JobShopSolution(orders, operations, machines, setters, toolings,
                 List.of(schedule), setupMatrix, ORIGIN_EPOCH);
+    }
+
+    /**
+     * Temps mur minimal pour exécuter une gamme, ressources supposées libres.
+     *
+     * <p>
+     * La mise en train compte pour son temps MUR et non pour son temps de travail : c'est tout
+     * l'objet de `CPT-KKI-007`. Le facteur est le rapport entre la semaine entière et les heures
+     * ouvertes du personnel — à quarante heures sur cent soixante-huit, seize heures de réglage
+     * immobilisent le poste plus de soixante heures.
+     */
+    private static long traversalSeconds(Routing routing, SetupMatrix setupMatrix, int articleId) {
+        double wallClockFactor = 604_800.0
+                / Math.max(1.0, (double) setterWorkingDays * setterWindowSeconds);
+        long total = 0L;
+        for (int pass = 0; pass < routing.passCount(); pass++) {
+            long setup = setupMatrix.coldStartSeconds(setupMatrix.keyOf(articleId, pass));
+            total += (long) (setup * wallClockFactor) + routing.durationSeconds()[pass];
+        }
+        return total;
     }
 
     /**
@@ -533,12 +575,29 @@ public final class FullDataGenerator {
      * Trois paliers : verrou dur sur ce qui est déjà lancé (première semaine), gel souple sur
      * l'horizon de trois semaines, libre au-delà.
      */
-    private static Order.FreezeLevel freezeLevelOf(long due, Random random) {
-        long delay = due - ORIGIN_EPOCH;
-        if (delay < hardFreezeHorizonSeconds && random.nextDouble() < hardFreezeShare) {
+    /**
+     * Le palier de gel se lit sur l'URGENCE RELATIVE de l'ordre dans le carnet, pas sur un délai
+     * absolu.
+     *
+     * <p>
+     * Il l'était : « date due à moins de sept jours ». Depuis que la date due ne peut plus
+     * précéder le temps de traversée de l'ordre — plusieurs semaines dès qu'une gamme compte
+     * quelques passes — plus AUCUN ordre n'atteignait ce seuil, et les trois paliers de
+     * `CPT-KKI-004` se réduisaient silencieusement à un seul. Deux tests l'ont attrapé.
+     *
+     * <p>
+     * Ce que le gel décrit est de toute façon un état du cycle de vie — « déjà lancé »,
+     * « publié » — donc la position de l'ordre dans le carnet, pas une distance à l'origine.
+     *
+     * @param urgency position de l'ordre dans la fenêtre de dates dues, 0 = le plus urgent
+     */
+    private static Order.FreezeLevel freezeLevelOf(double urgency, Random random) {
+        double hardFraction = (double) hardFreezeHorizonSeconds / Math.max(1L, horizonSeconds);
+        double softFraction = (double) softFreezeHorizonSeconds / Math.max(1L, horizonSeconds);
+        if (urgency < hardFraction && random.nextDouble() < hardFreezeShare) {
             return Order.FreezeLevel.HARD;
         }
-        if (delay < softFreezeHorizonSeconds) {
+        if (urgency < softFraction) {
             return Order.FreezeLevel.SOFT;
         }
         return Order.FreezeLevel.FREE;

@@ -762,10 +762,22 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
      * dotation dit laquelle des trois familles contraint réellement le plan.
      */
     public ResourceUsage resourceUsage() {
+        return resourceUsage(0L);
+    }
+
+    /**
+     * @param planningHorizonSeconds horizon sur lequel la CAPACITÉ est comptée. C'est lui qui
+     *                               donne son sens au taux de charge : un atelier qui met huit
+     *                               ans à écouler un carnet de six mois est chargé à 1600 %, pas
+     *                               à 100 %. Zéro = compter sur le makespan réel.
+     */
+    public ResourceUsage resourceUsage(long planningHorizonSeconds) {
         long horizon = 0L;
         for (int opId = 0; opId < opEnd.length; opId++) {
             horizon = Math.max(horizon, opEnd[opId] - origin);
         }
+        long capacityHorizon = planningHorizonSeconds > 0L ? planningHorizonSeconds : horizon;
+        double[] load = new double[operationsByMachine.length];
 
         long setupHold = 0L;
         long chainWait = 0L;
@@ -785,6 +797,7 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             }
             machinesUsed++;
             long freeAt = origin;
+            long required = 0L;
             for (Operation op : queue) {
                 int opId = (int) op.getId();
                 setupHold += setupEndAt[opId] - freeAt;
@@ -792,9 +805,19 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                 run += opEnd[opId] - opStart[opId];
                 machiningWork += op.getDurationSeconds();
                 setupWork += setupSecondsOf(opId);
+                // CHARGE NOMINALE, et surtout pas le temps observé. Le temps observé inclut
+                // toute l'attente accumulée : sur un plan qui met huit ans à écouler six mois de
+                // carnet, il donne des taux à deux mille pour cent, qui mesurent l'engorgement et
+                // non la capacité. La charge d'un atelier est le travail INTRINSÈQUE qu'il doit
+                // absorber : l'usinage, plus le temps mur qu'une mise en train immobilise le
+                // poste du seul fait du calendrier de son metteur — sans file d'attente.
+                required += nominalHoldSeconds(opId) + op.getDurationSeconds();
                 freeAt = opEnd[opId];
             }
             busiestMachineSpan = Math.max(busiestMachineSpan, freeAt - origin);
+            long capacity = machineCalendar[m].workedSecondsBefore(origin + capacityHorizon)
+                    - machineCalendar[m].workedSecondsBefore(origin);
+            load[m] = capacity > 0L ? (double) required / capacity : 0.0;
         }
 
         int settersUsed = 0;
@@ -820,18 +843,61 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             }
         }
 
-        return new ResourceUsage(horizon, operationsByMachine.length, machinesUsed,
+        double[] busy = Arrays.stream(load).filter(value -> value > 0.0).sorted().toArray();
+        double mean = Arrays.stream(busy).average().orElse(0.0);
+        long overloaded = Arrays.stream(busy).filter(value -> value > 1.0).count();
+        return new ResourceUsage(horizon, capacityHorizon, operationsByMachine.length, machinesUsed,
                 machineOpenSeconds, setupHold, chainWait, run, machiningWork,
                 busiestMachineSpan, setupsBySetter.length, settersUsed, setterOpenSeconds,
-                setupWork, setupsByTooling.length, toolingsUsed, toolingHold);
+                setupWork, setupsByTooling.length, toolingsUsed, toolingHold,
+                mean, quantile(busy, 0.5), quantile(busy, 0.9),
+                busy.length == 0 ? 0.0 : busy[busy.length - 1], overloaded);
     }
 
-    /** Un relevé de charge ; toutes les durées sont en secondes. */
-    public record ResourceUsage(long horizonSeconds, int machines, int machinesUsed,
-            long machineOpenSeconds, long machineSetupHold, long machineChainWait,
+    /**
+     * Temps mur pendant lequel une mise en train immobilise son poste, files d'attente exclues :
+     * le travail du metteur étiré par son propre calendrier. Seize heures de réglage sur un
+     * horaire de quarante heures par semaine prennent plus de soixante heures de poste.
+     */
+    private long nominalHoldSeconds(int opId) {
+        long work = setupSecondsOf(opId);
+        if (work <= 0L) {
+            return 0L;
+        }
+        WorkCalendar calendar = setterCalendar[assignedSetterId[opId]];
+        long openPerWeek = calendar.workedSecondsBefore(origin + 604_800L)
+                - calendar.workedSecondsBefore(origin);
+        if (openPerWeek <= 0L) {
+            return work;
+        }
+        return work * 604_800L / openPerWeek;
+    }
+
+    private static double quantile(double[] sorted, double fraction) {
+        if (sorted.length == 0) {
+            return 0.0;
+        }
+        return sorted[Math.min(sorted.length - 1, (int) (sorted.length * fraction))];
+    }
+
+    /**
+     * Un relevé de charge ; toutes les durées sont en secondes.
+     *
+     * <p>
+     * La grandeur qui décide n'est pas la charge MOYENNE mais sa DISTRIBUTION. Un atelier dont
+     * tous les postes sont à 80 % et un atelier à 80 % de moyenne avec des pointes au-dessus de
+     * 100 % ont la même moyenne et n'ont rien à voir : le premier n'offre rien à équilibrer, le
+     * second est exactement le cas où un système d'ordonnancement a de la valeur. D'où
+     * {@code overloadedMachines} — le nombre de postes au-dessus de cent pour cent, qui dit si
+     * l'instance a un déséquilibre à corriger ou si l'exercice est vide.
+     */
+    public record ResourceUsage(long horizonSeconds, long capacityHorizonSeconds, int machines,
+            int machinesUsed, long machineOpenSeconds, long machineSetupHold, long machineChainWait,
             long machineRun, long machiningWork, long busiestMachineSpan,
             int setters, int settersUsed, long setterOpenSeconds, long setterWork,
-            int toolings, int toolingsUsed, long toolingHold) {
+            int toolings, int toolingsUsed, long toolingHold,
+            double loadMean, double loadP50, double loadP90, double loadMax,
+            long overloadedMachines) {
 
         /** Machines qu'il faudrait si elles étaient prises à cent pour cent du temps d'ouverture. */
         public double machinesNeeded() {
@@ -848,8 +914,14 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             return toolingHold / Math.max(1.0, horizonSeconds);
         }
 
+        /** Charge du metteur, rapportée à l'horizon de planification et non au makespan. */
+        public double setterLoad() {
+            double perSetter = (double) setterOpenSeconds / Math.max(1, setters);
+            double capacity = perSetter * capacityHorizonSeconds / Math.max(1L, horizonSeconds);
+            return setterWork / Math.max(1.0, capacity * setters);
+        }
+
         public String describe(String label) {
-            double hours = 3600.0;
             long engaged = machineSetupHold + machineChainWait + machineRun;
             return String.format(
                     "resources[%s] horizon_d=%.0f busiest_machine_d=%.0f%n"
@@ -859,7 +931,9 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                             + "  metteurs   dotation=%d utilises=%d necessaires=%.0f"
                             + " | charge=%.1f%% des heures ouvertes%n"
                             + "  outillages dotation=%d utilises=%d necessaires=%.0f"
-                            + " | immobilisation=%.1f%% de l_horizon%n",
+                            + " | immobilisation=%.1f%% de l_horizon%n"
+                            + "  CHARGE     moyenne=%.0f%% p50=%.0f%% p90=%.0f%% max=%.0f%%"
+                            + " | postes_au_dessus_de_100%%=%d/%d | metteurs=%.0f%%%n",
                     label, horizonSeconds / 86_400.0, busiestMachineSpan / 86_400.0,
                     machines, machinesUsed, machinesNeeded(),
                     100.0 * machineSetupHold / Math.max(1L, engaged),
@@ -869,7 +943,9 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                     setters, settersUsed, settersNeeded(),
                     100.0 * setterWork / Math.max(1L, setterOpenSeconds),
                     toolings, toolingsUsed, toolingsNeeded(),
-                    100.0 * toolingHold / Math.max(1L, (long) toolings * horizonSeconds));
+                    100.0 * toolingHold / Math.max(1L, (long) toolings * horizonSeconds),
+                    100.0 * loadMean, 100.0 * loadP50, 100.0 * loadP90, 100.0 * loadMax,
+                    overloadedMachines, machinesUsed, 100.0 * setterLoad());
         }
     }
 

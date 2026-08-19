@@ -26,6 +26,9 @@ public final class ParameterSweepRunner {
     /** Au-dessous de cette part d'ordres en retard, l'instance n'est plus saturée. */
     private static final double SATURATION_LATE_SHARE = 0.20;
 
+    /** La zone où le client attend le système : chargé, pas vide, et pas non plus impossible. */
+    private static final double TARGET_LOAD = 0.80;
+
     private ParameterSweepRunner() {
     }
 
@@ -38,6 +41,8 @@ public final class ParameterSweepRunner {
             case "combined" -> combined(orderCount);
             case "balance" -> balance(orderCount);
             case "grouping" -> grouping(orderCount);
+            case "calibrate" -> calibrate(orderCount);
+            case "load" -> loadSweep(orderCount);
             case "solve" -> solve(orderCount, args.length > 2 ? Long.parseLong(args[2]) : 60L);
             default -> throw new IllegalArgumentException("commande inconnue : " + command);
         }
@@ -194,6 +199,124 @@ public final class ParameterSweepRunner {
             System.out.print(measure(orders).describe("all_relaxed+orders=" + orders));
         }
         FullDataGenerator.reset();
+    }
+
+    /**
+     * Calibre l'instance sur la ZONE où le système a de la valeur.
+     *
+     * <p>
+     * Objectif opérateur : « pas une entreprise dont l'atelier est vide, mais une entreprise dont
+     * la charge dépasse cent pour cent sans optimisation et retombe à quatre-vingt pour cent,
+     * équilibrée, grâce au système ».
+     *
+     * <p>
+     * Ce que cela veut dire, mesurable : une charge MOYENNE autour de quatre-vingts pour cent, et
+     * une DISTRIBUTION assez dispersée pour que des postes dépassent cent pour cent. Les deux
+     * ensemble, car ils ne disent pas la même chose — un atelier dont TOUS les postes sont à
+     * quatre-vingts pour cent a la même moyenne et n'offre rien à équilibrer.
+     *
+     * <p>
+     * Deux bissections, dans cet ordre : le nombre de metteurs d'abord, parce qu'il commande le
+     * temps mur d'immobilisation donc la charge des postes ; la durée d'usinage ensuite, qui
+     * n'agit que sur la charge des postes. La borne arithmétique « heures de travail / heures
+     * offertes » n'est PAS utilisée comme réponse : elle ne regarde que la conservation du
+     * travail, et cette session a déjà retiré deux chiffres obtenus ainsi. Elle sert de point de
+     * départ, la mesure tranche.
+     */
+    private static void calibrate(int orderCount) {
+        FullDataGenerator.reset();
+        System.out.print(loadOf(orderCount).describe("avant_calibration"));
+
+        // 1. Metteurs — plancher dur à une par technologie (l'opérateur : « il doit y avoir
+        //    minimum un metteur en train par technologie, sinon l'exercice ne peut pas se faire »).
+        int low = FullDataGenerator.technologies;
+        int high = 900;
+        while (high - low > Math.max(2, low / 20)) {
+            int middle = (low + high) / 2;
+            FullDataGenerator.reset();
+            FullDataGenerator.setterCount = middle;
+            double setterLoad = loadOf(orderCount).setterLoad();
+            System.out.printf("  probe setters=%d charge_metteur=%.0f%%%n", middle,
+                    100.0 * setterLoad);
+            if (setterLoad > TARGET_LOAD) {
+                low = middle; // trop peu de metteurs : ils saturent
+            } else {
+                high = middle;
+            }
+        }
+        int setters = high;
+
+        // 2. Durée d'usinage — le seul paramètre de volume qui reste, les autres étant donnés.
+        long lowDuration = 3600L;
+        long highDuration = 600L * 3600L;
+        while (highDuration - lowDuration > 3600L) {
+            long middle = (lowDuration + highDuration) / 2;
+            FullDataGenerator.reset();
+            FullDataGenerator.setterCount = setters;
+            FullDataGenerator.minDurationSeconds = middle / 2;
+            FullDataGenerator.durationSpreadSeconds = middle;
+            double load = loadOf(orderCount).loadMean();
+            System.out.printf("  probe usinage=%.0fh charge_moyenne=%.0f%%%n", middle / 3600.0,
+                    100.0 * load);
+            if (load < TARGET_LOAD) {
+                lowDuration = middle;
+            } else {
+                highDuration = middle;
+            }
+        }
+
+        FullDataGenerator.reset();
+        FullDataGenerator.setterCount = setters;
+        FullDataGenerator.minDurationSeconds = highDuration / 2;
+        FullDataGenerator.durationSpreadSeconds = highDuration;
+        FullScoreCalculator.ResourceUsage calibrated = loadOf(orderCount);
+        System.out.print(calibrated.describe("apres_calibration"));
+        System.out.printf("CALIBRATION setters=%d usinage_h=[%.0f, %.0f]%n", setters,
+                FullDataGenerator.minDurationSeconds / 3600.0,
+                (FullDataGenerator.minDurationSeconds + FullDataGenerator.durationSpreadSeconds)
+                        / 3600.0);
+        if (calibrated.overloadedMachines() == 0L) {
+            System.out.println("VERDICT instance SANS desequilibre : rien a equilibrer, l'exercice"
+                    + " serait vide meme si la moyenne tombe juste");
+        }
+        FullDataGenerator.reset();
+    }
+
+    /**
+     * Balaye ce qui commande la charge de MISE EN TRAIN — le poste dominant.
+     *
+     * <p>
+     * La calibration par la durée d'usinage bute sur un plancher : l'immobilisation de mise en
+     * train charge à elle seule l'atelier à cent pour cent. Deux dimensions la commandent :
+     * <ul>
+     * <li>le NOMBRE D'ARTICLES — moins d'articles, c'est plus d'ordres par clé (article, passe),
+     * donc des mises en train que le groupage peut annuler (`setup(A→A) = 0` de `CPT-KKI-006`) ;</li>
+     * <li>les HEURES OUVERTES du personnel de réglage — elles divisent directement le temps mur
+     * d'immobilisation.</li>
+     * </ul>
+     */
+    private static void loadSweep(int orderCount) {
+        for (int articles : new int[] { 200, 100, 50, 25 }) {
+            FullDataGenerator.reset();
+            FullDataGenerator.articleCount = articles;
+            System.out.print(loadOf(orderCount).describe("articles=" + articles));
+        }
+        for (int hours : new int[] { 8, 12, 16 }) {
+            FullDataGenerator.reset();
+            FullDataGenerator.setterWindowSeconds = hours * 3600L;
+            System.out.print(loadOf(orderCount).describe("poste_metteur=" + hours + "h"));
+        }
+        FullDataGenerator.reset();
+    }
+
+    /** Charge relevée à froid, capacité comptée sur l'HORIZON DE PLANIFICATION. */
+    private static FullScoreCalculator.ResourceUsage loadOf(int orderCount) {
+        JobShopSolution problem = FullDataGenerator.generate(orderCount, 42L);
+        problem.getScheduleList().get(0).getOrderSequence()
+                .sort(Comparator.comparingLong(Order::getDueEpochSec));
+        FullScoreCalculator calculator = new FullScoreCalculator();
+        calculator.resetWorkingSolution(problem);
+        return calculator.resourceUsage(FullDataGenerator.horizonSeconds);
     }
 
     /**
