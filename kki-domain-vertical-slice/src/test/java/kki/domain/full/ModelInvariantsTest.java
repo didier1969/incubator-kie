@@ -99,8 +99,25 @@ class ModelInvariantsTest {
     void noMachiningHappensWhileTheMachineIsClosedOrUnderMaintenance() {
         // Attrape le cas où le calendrier machine ne servirait qu'à décorer : une opération
         // entièrement contenue dans une fenêtre de maintenance passerait inaperçue autrement.
+        //
+        // ⚠️ Cet invariant est TRIVIALEMENT vrai sur une machine ouverte 24/7 : il n'a de valeur
+        // que s'il porte sur des opérations réellement placées sur des machines à horaire limité.
+        // Il a été écrit quand la plupart des machines étaient continues, où il ne prouvait donc
+        // presque rien ; on compte désormais ce qu'il exerce vraiment.
         Fixture fixture = Fixture.build();
         int checked = 0;
+        int onRestrictedMachines = 0;
+        for (Operation op : fixture.solution.getOperationList()) {
+            WorkCalendar machineCalendar =
+                    fixture.solution.getMachineList().get((int) op.getMachineId()).getCalendar();
+            if (machineCalendar.getPattern().workedBefore(7L * 86_400L) < 7L * 86_400L) {
+                onRestrictedMachines++;
+            }
+        }
+        assertTrue(onRestrictedMachines > 100,
+                "l'invariant ne mord que sur des machines à horaire LIMITÉ ; l'instance n'en"
+                        + " place que " + onRestrictedMachines + " opérations sur de telles"
+                        + " machines, il serait vrai par vacuité");
         for (Operation op : fixture.solution.getOperationList()) {
             int opId = (int) op.getId();
             WorkCalendar calendar =

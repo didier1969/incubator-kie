@@ -57,6 +57,11 @@ public final class FullRunner {
         if (args.length > 3) {
             FullDataGenerator.levelDemandSkew = Double.parseDouble(args[3]);
         }
+        if (args.length > 4) {
+            // Pour isoler un effet d'un autre : deux changements dans un même commit ne se
+            // départagent pas en relisant le diff, seulement en refaisant la mesure.
+            FullDataGenerator.setterWorkingDays = Integer.parseInt(args[4]);
+        }
 
         JobShopSolution problem = FullDataGenerator.generate(orderCount, seed);
         System.out.printf("full_instance orders=%d operations=%d machines=%d setters=%d"

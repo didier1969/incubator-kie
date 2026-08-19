@@ -410,14 +410,20 @@ public final class FullDataGenerator {
             return new ShiftCatalog(sectors, profiles);
         }
 
-        /** Jours fermés pour tout l'atelier — communs, donc dans le MOTIF et non par ressource. */
+        /**
+         * Jours fermés pour tout l'atelier — communs, donc dans le MOTIF et non par ressource.
+         *
+         * <p>
+         * Dédupliqués : un tirage avec remise rendrait MOINS de jours fermés distincts que
+         * demandé, et le nombre annoncé ne serait pas celui obtenu.
+         */
         private static int[] holidayDays(Random random) {
-            int count = Math.max(0, holidaysPerYear * fineDayCount / 365);
-            int[] days = new int[count];
-            for (int i = 0; i < count; i++) {
-                days[i] = random.nextInt(Math.max(1, fineDayCount));
+            int wanted = Math.max(0, holidaysPerYear * fineDayCount / 365);
+            java.util.Set<Integer> distinct = new java.util.TreeSet<>();
+            for (int guard = 0; distinct.size() < wanted && guard < wanted * 20; guard++) {
+                distinct.add(random.nextInt(Math.max(1, fineDayCount)));
             }
-            return days;
+            return distinct.stream().mapToInt(Integer::intValue).toArray();
         }
     }
 
