@@ -35,10 +35,6 @@ import org.optaplanner.core.api.score.calculator.IncrementalScoreCalculator;
  */
 public final class FullScoreCalculator implements IncrementalScoreCalculator<JobShopSolution, HardSoftLongScore> {
 
-    private static final long SETTER_CENTS_PER_HOUR = 25_000L;
-    private static final long TARDINESS_CENTS_PER_HOUR2 = 1_000L;
-    private static final long EARLINESS_CENTS_PER_HOUR2 = 100L;
-    private static final long SOFT_FREEZE_CENTS_PER_HOUR = 500L;
     /** Assez grand pour que le rang reste (position X, passe) sans collision. */
     private static final int RANK_STRIDE = 16;
 
@@ -260,8 +256,8 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
 
         long start = Math.max(setupEnd, chainReadyAt);
         long end = start + op.getDurationSeconds();
-        long resourceCents = setupSeconds * SETTER_CENTS_PER_HOUR / 3600L
-                + machineIdle * machineHourlyCents[assignedMachineId[opId]] / 3600L;
+        long resourceCents = CostModel.resourceCents(setupSeconds, machineIdle,
+                machineHourlyCents[assignedMachineId[opId]]);
 
         boolean changed = start != opStart[opId] || end != opEnd[opId]
                 || resourceCents != opResourceCents[opId];
@@ -296,19 +292,7 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
     }
 
     private long orderCostCents(Order order, long completion) {
-        double deviationHours = (completion - order.getDueEpochSec()) / 3600.0;
-        long cents;
-        if (deviationHours > 0.0) {
-            cents = Math.round(deviationHours * deviationHours * TARDINESS_CENTS_PER_HOUR2
-                    * order.getPriorityWeight());
-        } else {
-            cents = Math.round(deviationHours * deviationHours * EARLINESS_CENTS_PER_HOUR2);
-        }
-        if (order.getFreezeLevel() == Order.FreezeLevel.SOFT) {
-            double driftHours = Math.abs(completion - order.getReferenceCompletionEpochSec()) / 3600.0;
-            cents += Math.round(driftHours * SOFT_FREEZE_CENTS_PER_HOUR);
-        }
-        return cents;
+        return CostModel.orderCents(order, completion);
     }
 
     /** ORACLE — balayage complet à froid, indépendant de tout état incrémental. */
@@ -334,8 +318,7 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                 long machineIdle = setupEnd - machineFree[m] - setupSeconds;
                 long start = Math.max(setupEnd, chainReadyAt);
                 long finish = start + op.getDurationSeconds();
-                soft -= setupSeconds * SETTER_CENTS_PER_HOUR / 3600L
-                        + machineIdle * machineHourlyCents[m] / 3600L;
+                soft -= CostModel.resourceCents(setupSeconds, machineIdle, machineHourlyCents[m]);
                 machineFree[m] = finish;
                 lastKeyOnMachine[m] = op.getSetupKey();
                 chainReadyAt = finish;
