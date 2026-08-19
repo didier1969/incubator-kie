@@ -37,31 +37,78 @@ public final class WorkCalendar {
     private static final long DAY = 86_400L;
     private static final long WEEK = 7L * DAY;
 
+    /** Masque de tous les jours ouvrés — lundi = bit 0, dimanche = bit 6. */
+    public static final int EVERY_DAY = 0b111_1111;
+    /** Lundi, mardi, mercredi. */
+    public static final int MONDAY_TO_WEDNESDAY = 0b000_0111;
+    /**
+     * Vendredi ET lundi — le motif NON CONTIGU de l'exemple opérateur. Impossible à décrire tant
+     * que le calendrier ne connaissait que « les N premiers jours de la semaine ».
+     */
+    public static final int FRIDAY_AND_MONDAY = 0b001_0001;
+
     /** Machine sans interruption : ouverte 7 jours sur 7, 24 h sur 24. */
-    public static final WorkCalendar CONTINUOUS = new WorkCalendar(7, 0L, DAY, new long[0]);
+    public static final WorkCalendar CONTINUOUS = new WorkCalendar(EVERY_DAY, 0L, DAY, new long[0]);
 
     /** Rendu par {@link #occupancyStart} quand l'occupation ne peut pas tenir avant la borne. */
     public static final long IMPOSSIBLE = Long.MIN_VALUE / 4;
 
     /** Metteur en train type : lundi à mercredi, 08:00–16:00. */
     public static final WorkCalendar MONDAY_TO_WEDNESDAY_8H =
-            new WorkCalendar(3, 8L * 3600L, 8L * 3600L, new long[0]);
+            new WorkCalendar(MONDAY_TO_WEDNESDAY, 8L * 3600L, 8L * 3600L, new long[0]);
 
-    private final long workingDays;
+    private final int workingDayMask;
     private final long windowStart;
     private final long windowLength;
     private final long workPerWeek;
+    /**
+     * Temps ouvert cumulé depuis le lundi 00:00 jusqu'au début du jour <i>d</i>, pour d de 0 à 7.
+     * Huit entiers qui remplacent une boucle sur les jours à chaque conversion — les deux
+     * conversions sont sur le chemin chaud de la datation.
+     */
+    private final long[] workedByStartOfDay;
 
     /** Indisponibilités datées, aplaties en [début, fin) triés et disjoints. */
     private final long[] blackouts;
     /** Temps ouvert perdu cumulé avant chaque indisponibilité — évite de les reparcourir. */
     private final long[] lostBefore;
 
-    public WorkCalendar(long workingDays, long windowStart, long windowLength, long[] blackouts) {
-        this.workingDays = workingDays;
+    /**
+     * Motif CONTIGU : les {@code workingDays} premiers jours de la semaine.
+     *
+     * <p>
+     * C'est une FABRIQUE NOMMÉE et non une surcharge du constructeur, délibérément. Une surcharge
+     * {@code (long workingDays, ...)} à côté de {@code (int mask, ...)} se distingue par le seul
+     * type du premier argument : Java choisit alors {@code int} pour tout littéral, et
+     * {@code new WorkCalendar(5, ...)} — « les cinq premiers jours » — devient silencieusement le
+     * masque {@code 0b101}, soit lundi et mercredi. L'erreur ne se voit ni à la compilation ni à
+     * la lecture ; elle a doublé le coût de l'instance de référence avant d'être trouvée.
+     */
+    public static WorkCalendar ofFirstDays(int workingDays, long windowStart, long windowLength,
+            long[] blackouts) {
+        return new WorkCalendar(maskOfFirstDays(workingDays), windowStart, windowLength, blackouts);
+    }
+
+    /**
+     * Motif QUELCONQUE, décrit par un masque de jours — lundi = bit 0, dimanche = bit 6.
+     *
+     * <p>
+     * La version précédente ne savait exprimer que « les N premiers jours de la semaine ». Or
+     * l'opérateur a donné en exemple un metteur qui travaille <b>le vendredi et le lundi</b> :
+     * un motif non contigu, et le pire cas du modèle — une mise en train de 16 h y bloque la
+     * machine du vendredi au lundi soir, soit une centaine d'heures de production perdues pour
+     * seize heures de travail. Ce cas-là n'était pas représentable, donc pas testable.
+     */
+    public WorkCalendar(int workingDayMask, long windowStart, long windowLength, long[] blackouts) {
+        this.workingDayMask = workingDayMask & EVERY_DAY;
         this.windowStart = windowStart;
         this.windowLength = windowLength;
-        this.workPerWeek = workingDays * windowLength;
+        this.workPerWeek = Integer.bitCount(this.workingDayMask) * windowLength;
+        this.workedByStartOfDay = new long[8];
+        for (int day = 0; day < 7; day++) {
+            workedByStartOfDay[day + 1] = workedByStartOfDay[day]
+                    + (isWorkingDay(day) ? windowLength : 0L);
+        }
         this.blackouts = blackouts.clone();
         this.lostBefore = new long[blackouts.length / 2 + 1];
         long cumulated = 0L;
@@ -74,7 +121,15 @@ public final class WorkCalendar {
 
     /** Le même calendrier, avec des indisponibilités datées en plus. */
     public WorkCalendar withBlackouts(long[] flattenedIntervals) {
-        return new WorkCalendar(workingDays, windowStart, windowLength, flattenedIntervals);
+        return new WorkCalendar(workingDayMask, windowStart, windowLength, flattenedIntervals);
+    }
+
+    private boolean isWorkingDay(int dayOfWeek) {
+        return (workingDayMask & (1 << dayOfWeek)) != 0;
+    }
+
+    private static int maskOfFirstDays(int count) {
+        return (1 << Math.max(0, Math.min(7, count))) - 1;
     }
 
     /** Secondes réellement ouvertes entre l'origine et {@code time}, indisponibilités déduites. */
@@ -102,12 +157,30 @@ public final class WorkCalendar {
      * seule fois. Exact, et en O(log n).
      */
     public long timeAtWorkedSeconds(long workedSeconds) {
+        return patternTimeAtEarliest(workedSeconds + lostBeforeReaching(workedSeconds));
+    }
+
+    /**
+     * Le même instant, pris à l'autre bout de sa classe d'équivalence.
+     *
+     * <p>
+     * Un compteur de temps ouvert ne désigne pas UN instant mais un intervalle : la fermeture du
+     * vendredi 16:00 et l'ouverture du lundi 08:00 portent le même compteur, et tout le week-end
+     * entre les deux aussi. Pour une date au plus TÔT — quand une occupation se termine-t-elle
+     * réellement — c'est le début de l'intervalle qui compte. Pour une date au plus TARD — la
+     * passe amont — c'en est la fin.
+     */
+    public long latestTimeAtWorkedSeconds(long workedSeconds) {
+        return patternTimeAtLatest(workedSeconds + lostBeforeReaching(workedSeconds));
+    }
+
+    /** Temps ouvert perdu dans les fenêtres entièrement franchies pour atteindre ce compteur. */
+    private long lostBeforeReaching(long workedSeconds) {
         if (blackouts.length == 0) {
-            return patternTimeAt(workedSeconds);
+            return 0L;
         }
         int low = 0;
-        int high = blackouts.length / 2; // nombre de fenêtres
-        // Cherche le nombre de fenêtres entièrement franchies pour ce compteur de temps ouvert.
+        int high = blackouts.length / 2;
         while (low < high) {
             int mid = (low + high) >>> 1;
             if (netWorkedBeforeWindow(mid) <= workedSeconds) {
@@ -116,7 +189,7 @@ public final class WorkCalendar {
                 high = mid;
             }
         }
-        return patternTimeAt(workedSeconds + lostBefore[low]);
+        return lostBefore[low];
     }
 
     /** Temps ouvert net, indisponibilités antérieures déduites, avant le début de la fenêtre. */
@@ -161,7 +234,7 @@ public final class WorkCalendar {
         if (available < workSeconds) {
             return IMPOSSIBLE;
         }
-        return timeAtWorkedSeconds(available - workSeconds);
+        return latestTimeAtWorkedSeconds(available - workSeconds);
     }
 
     /**
@@ -179,9 +252,10 @@ public final class WorkCalendar {
     /** La ressource est-elle ouverte à cet instant précis ? */
     public boolean isOpenAt(long time) {
         long remainder = Math.floorMod(time, WEEK);
-        long day = remainder / DAY;
+        int day = (int) (remainder / DAY);
         long timeOfDay = remainder % DAY;
-        if (day >= workingDays || timeOfDay < windowStart || timeOfDay >= windowStart + windowLength) {
+        if (!isWorkingDay(day) || timeOfDay < windowStart
+                || timeOfDay >= windowStart + windowLength) {
             return false;
         }
         return !isBlackedOutAt(time);
@@ -205,22 +279,57 @@ public final class WorkCalendar {
         }
         long weeks = time / WEEK;
         long remainder = time % WEEK;
-        long worked = weeks * workPerWeek;
-        long day = remainder / DAY;
+        int day = (int) (remainder / DAY);
         long timeOfDay = remainder % DAY;
-        worked += Math.min(day, workingDays) * windowLength;
-        if (day < workingDays) {
+        long worked = weeks * workPerWeek + workedByStartOfDay[day];
+        if (isWorkingDay(day)) {
             worked += Math.max(0L, Math.min(timeOfDay - windowStart, windowLength));
         }
         return worked;
     }
 
-    private long patternTimeAt(long workedSeconds) {
+    /**
+     * PREMIER instant portant ce compteur de temps ouvert — la fermeture du dernier jour ouvré
+     * traversé, pas l'ouverture du suivant.
+     *
+     * <p>
+     * La version précédente rendait le représentant le plus TARDIF, y compris pour
+     * {@link #occupancyEnd}. Avec un motif lundi-mercredi cela ajoutait une nuit fictive à toute
+     * mise en train se terminant pile en fin de journée ; avec le motif vendredi + lundi de
+     * l'opérateur, cela ajoutait <b>quatre jours</b> — et ces heures étaient facturées au coût
+     * horaire de la machine.
+     */
+    private long patternTimeAtEarliest(long workedSeconds) {
         long weeks = workedSeconds / workPerWeek;
         long remainder = workedSeconds % workPerWeek;
-        long day = remainder / windowLength;
-        long within = remainder % windowLength;
-        return weeks * WEEK + day * DAY + windowStart + within;
+        if (remainder == 0L) {
+            if (weeks == 0L) {
+                return 0L; // rien n'a encore été travaillé : le plus tôt est l'origine
+            }
+            // Un compteur qui tombe pile sur un multiple de la semaine désigne la FERMETURE du
+            // dernier jour ouvré de la semaine précédente, jamais l'ouverture de la suivante.
+            int lastWorkingDay = 31 - Integer.numberOfLeadingZeros(workingDayMask);
+            return (weeks - 1) * WEEK + (long) lastWorkingDay * DAY + windowStart + windowLength;
+        }
+        // Les jours fermés ne font pas progresser le cumul : la boucle les franchit d'elle-même.
+        int day = 0;
+        while (day < 7 && workedByStartOfDay[day + 1] < remainder) {
+            day++;
+        }
+        return weeks * WEEK + (long) day * DAY + windowStart
+                + (remainder - workedByStartOfDay[day]);
+    }
+
+    /** DERNIER instant portant ce compteur — ce que veut une date au plus tard. */
+    private long patternTimeAtLatest(long workedSeconds) {
+        long weeks = workedSeconds / workPerWeek;
+        long remainder = workedSeconds % workPerWeek;
+        int day = 0;
+        while (day < 7 && workedByStartOfDay[day + 1] <= remainder) {
+            day++;
+        }
+        return weeks * WEEK + (long) day * DAY + windowStart
+                + (remainder - workedByStartOfDay[day]);
     }
 
     /** Temps ouvert perdu dans les indisponibilités situées avant {@code time}. */

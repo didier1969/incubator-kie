@@ -60,8 +60,24 @@ public final class FullDataGenerator {
     public static long durationSpreadSeconds = 16L * 3600L;
     /** Exposant de la loi sur le niveau technologique requis. 2 = les articles simples dominent. */
     public static double levelDemandSkew = 2.0;
-    /** Nombre de metteurs en train. Dimension du domaine, balayée — jamais devinée. */
-    public static int setterCount = 40;
+    /**
+     * Nombre de metteurs en train — CALCULÉ, jamais deviné, et surtout jamais demandé.
+     *
+     * <p>
+     * Le produit est le système APS3D ; le plan n'est que l'instrument qui sert à l'éprouver.
+     * Une valeur d'instance manquante est donc une dimension à ajuster ici, pas une question à
+     * poser. Le calcul, pour 5000 ordres :
+     * <pre>
+     *   17 489 mises en train × 16 h médiane      = 279 824 h de metteur à fournir
+     *   1 metteur × 3 jours × 8 h × 26 semaines   =     624 h sur l'horizon
+     *   plancher arithmétique                     =     449 metteurs
+     *   × 2 pour l'imperfection de l'ordonnancement =   900
+     * </pre>
+     * La valeur précédente — 40 — était un chiffre posé au jugé, sur-souscrit d'un facteur 11.
+     * Elle plaçait tous les ordres à treize ans de retard et écrasait le paysage de coût sous un
+     * terme unique, rendant tout autre levier invisible à la mesure.
+     */
+    public static int setterCount = 900;
     /** Nombre de technologies que chaque metteur sait régler. 1 = spécialiste, 5 = polyvalent. */
     public static int setterSkillBreadth = 2;
     /**
@@ -75,6 +91,12 @@ public final class FullDataGenerator {
      * physique de l'atelier sans jamais l'écrire.
      */
     public static int setterWorkingDays = 3;
+    /**
+     * Motif de jours QUELCONQUE, prioritaire sur {@link #setterWorkingDays} quand il est non nul.
+     * Seul moyen d'exprimer un metteur qui travaille le vendredi et le lundi — un motif non
+     * contigu, et le pire cas du modèle.
+     */
+    public static int setterWorkingDayMask = 0;
     public static long setterWindowSeconds = 8L * 3600L;
     /** Heure d'ouverture de la plage metteur. */
     public static long setterWindowStartSeconds = 8L * 3600L;
@@ -123,9 +145,10 @@ public final class FullDataGenerator {
         minDurationSeconds = 5L * 3600L;
         durationSpreadSeconds = 16L * 3600L;
         levelDemandSkew = 2.0;
-        setterCount = 40;
+        setterCount = 900;
         setterSkillBreadth = 2;
         setterWorkingDays = 3;
+        setterWorkingDayMask = 0;
         setterWindowSeconds = 8L * 3600L;
         setterWindowStartSeconds = 8L * 3600L;
         setterAbsenceShare = 0.15;
@@ -312,7 +335,7 @@ public final class FullDataGenerator {
      */
     private static WorkCalendar machineCalendarOf(Random random) {
         WorkCalendar base = random.nextDouble() < nonContinuousMachineShare
-                ? new WorkCalendar(5, 6L * 3600L, 16L * 3600L, new long[0])
+                ? WorkCalendar.ofFirstDays(5, 6L * 3600L, 16L * 3600L, new long[0])
                 : WorkCalendar.CONTINUOUS;
         return base.withBlackouts(maintenanceWindows(random));
     }
@@ -336,8 +359,11 @@ public final class FullDataGenerator {
      * CPT-KKI-007 ne demande aucun mécanisme dédié — c'est un trou dans SON calendrier.
      */
     private static WorkCalendar setterCalendarOf(Random random) {
-        WorkCalendar base = new WorkCalendar(setterWorkingDays, setterWindowStartSeconds,
-                setterWindowSeconds, new long[0]);
+        WorkCalendar base = setterWorkingDayMask != 0
+                ? new WorkCalendar(setterWorkingDayMask, setterWindowStartSeconds,
+                        setterWindowSeconds, new long[0])
+                : WorkCalendar.ofFirstDays(setterWorkingDays, setterWindowStartSeconds,
+                        setterWindowSeconds, new long[0]);
         if (random.nextDouble() < setterAbsenceShare) {
             long start = (long) (random.nextDouble() * horizonSeconds * 0.9);
             return base.withBlackouts(new long[] { start, start + setterAbsenceSeconds });

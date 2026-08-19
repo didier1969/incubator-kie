@@ -35,6 +35,7 @@ public final class ParameterSweepRunner {
             case "threshold" -> threshold(orderCount);
             case "sweep" -> sweep(orderCount);
             case "combined" -> combined(orderCount);
+            case "balance" -> balance(orderCount);
             case "solve" -> solve(orderCount, args.length > 2 ? Long.parseLong(args[2]) : 60L);
             default -> throw new IllegalArgumentException("commande inconnue : " + command);
         }
@@ -193,6 +194,70 @@ public final class ParameterSweepRunner {
         FullDataGenerator.reset();
     }
 
+    /**
+     * Teste l'hypothèse du goulot RÉEL : la concentration de la demande au bas de l'échelle.
+     *
+     * <p>
+     * Le générateur affecte chaque opération à une machine de son niveau REQUIS exactement,
+     * jamais au-dessus. Avec une demande en 1/rang², 64,5 % des opérations visent alors 10 % des
+     * machines, pendant que le haut de l'échelle reste vide. La substitution ascendante
+     * — mouvement (5) de `CPT-KKI-010` — existe précisément pour cela.
+     *
+     * <p>
+     * Ce que cette commande mesure n'est PAS un algorithme : c'est un équilibrage glouton en une
+     * passe, appliqué AVANT toute datation. Si le retard s'effondre, alors l'instance n'était pas
+     * infaisable — c'est le système qui n'exerçait pas assez le levier, et c'est un résultat sur
+     * le SYSTÈME, pas sur l'atelier.
+     */
+    private static void balance(int orderCount) {
+        FullDataGenerator.reset();
+        System.out.print(measure(orderCount).describe("as_generated"));
+
+        FullDataGenerator.reset();
+        System.out.print(measureBalanced(orderCount).describe("upward_balanced"));
+
+        // Et avec un dimensionnement metteur COHÉRENT, calculé et non deviné : 17 489 mises en
+        // train de 16 h médianes demandent 279 824 h de metteur ; un metteur ouvre 24 h par
+        // semaine, soit 624 h sur l'horizon ; il en faut donc 449 au strict minimum, et le
+        // double pour absorber l'imperfection de l'ordonnancement.
+        FullDataGenerator.reset();
+        FullDataGenerator.setterCount = 900;
+        System.out.print(measure(orderCount).describe("setters=900"));
+        FullDataGenerator.reset();
+        FullDataGenerator.setterCount = 900;
+        System.out.print(measureBalanced(orderCount).describe("setters=900+upward_balanced"));
+        FullDataGenerator.reset();
+    }
+
+    /**
+     * Équilibrage glouton : chaque opération va sur celle de ses machines compatibles dont la
+     * charge cumulée est la plus faible. La charge compte le temps MUR d'immobilisation — mise en
+     * train comprise — parce que c'est lui qui sature la machine, pas les heures d'usinage.
+     */
+    private static Regime measureBalanced(int orderCount) {
+        JobShopSolution problem = FullDataGenerator.generate(orderCount, 42L);
+        long[] loadSeconds = new long[problem.getMachineList().size()];
+        double wallClockFactor = 604_800.0
+                / Math.max(1.0, FullDataGenerator.setterWorkingDays * FullDataGenerator.setterWindowSeconds);
+        for (Operation op : problem.getOperationList()) {
+            Machine best = null;
+            long bestLoad = Long.MAX_VALUE;
+            for (Machine candidate : op.getCompatibleMachines()) {
+                long load = loadSeconds[(int) candidate.getId()];
+                if (load < bestLoad) {
+                    bestLoad = load;
+                    best = candidate;
+                }
+            }
+            op.setMachine(best);
+            loadSeconds[(int) best.getId()] = bestLoad + op.getDurationSeconds()
+                    + (long) (16 * 3600 * wallClockFactor);
+        }
+        problem.getScheduleList().get(0).getOrderSequence()
+                .sort(Comparator.comparingLong(Order::getDueEpochSec));
+        return regimeOf(problem);
+    }
+
     // ************************************************************************
     // Un point NON saturé résolu pour de vrai
     // ************************************************************************
@@ -249,6 +314,10 @@ public final class ParameterSweepRunner {
         // régime sur un ordre de génération aléatoire décrirait le hasard, pas l'atelier.
         problem.getScheduleList().get(0).getOrderSequence()
                 .sort(Comparator.comparingLong(Order::getDueEpochSec));
+        return regimeOf(problem);
+    }
+
+    private static Regime regimeOf(JobShopSolution problem) {
         FullScoreCalculator calculator = new FullScoreCalculator();
         calculator.resetWorkingSolution(problem);
         FullScoreCalculator.ColdSweep cold = calculator.coldSweep();
