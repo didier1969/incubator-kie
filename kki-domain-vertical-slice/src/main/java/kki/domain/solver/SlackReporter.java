@@ -149,6 +149,98 @@ public final class SlackReporter {
         return slack;
     }
 
+    /** Répartition du coût entre les ordres finissant trop tôt et ceux finissant trop tard. */
+    public record CostSplit(long earliness, long tardiness) {
+        public double earlinessShare() {
+            long total = earliness + tardiness;
+            return total == 0L ? 0.0 : (double) earliness / total;
+        }
+    }
+
+    public CostSplit costSplit() {
+        long earliness = 0L;
+        long tardiness = 0L;
+        for (Order order : solution.getOrderList()) {
+            long completion = orderCompletion[(int) order.getId()];
+            long cost = computeOrderCost(order, completion);
+            if (completion > order.getRequiredDueEpochSec()) {
+                tardiness += cost;
+            } else {
+                earliness += cost;
+            }
+        }
+        return new CostSplit(earliness, tardiness);
+    }
+
+    /** Nombre d'opérations critiques (marge à l'échéance ≤ 0) portées par chaque machine. */
+    public long[] criticalOperationCountByMachine() {
+        long[] slackToDue = slack(true);
+        long[] byMachine = new long[solution.getMachineList().size()];
+        for (Operation op : solution.getOperationList()) {
+            if (slackToDue[idx(op)] <= 0L) {
+                byMachine[(int) op.getMachineId()]++;
+            }
+        }
+        return byMachine;
+    }
+
+    /** Nombre total d'opérations portées par chaque machine — la charge, indépendamment de la criticité. */
+    public long[] operationCountByMachine() {
+        long[] byMachine = new long[solution.getMachineList().size()];
+        for (Operation op : solution.getOperationList()) {
+            byMachine[(int) op.getMachineId()]++;
+        }
+        return byMachine;
+    }
+
+    /** Fin du plan naïf, en secondes depuis l'origine. */
+    public long makespanSeconds() {
+        long makespan = 0L;
+        for (Order order : solution.getOrderList()) {
+            makespan = Math.max(makespan, orderCompletion[(int) order.getId()] - origin);
+        }
+        return makespan;
+    }
+
+    /** Échéance la plus lointaine, en secondes depuis l'origine. */
+    public long horizonSeconds() {
+        long horizon = 0L;
+        for (Order order : solution.getOrderList()) {
+            horizon = Math.max(horizon, order.getRequiredDueEpochSec() - origin);
+        }
+        return horizon;
+    }
+
+    public long totalWorkSeconds() {
+        long totalWork = 0L;
+        for (Operation op : solution.getOperationList()) {
+            totalWork += op.getDurationSeconds();
+        }
+        return totalWork;
+    }
+
+    /**
+     * Part portée par les {@code percent} % d'entités les plus chargées d'une distribution.
+     * Sert à comparer une concentration à une autre sans constante d'échelle.
+     */
+    public static double topShareOf(long[] values, int percent) {
+        long total = 0L;
+        for (long value : values) {
+            total += value;
+        }
+        if (total == 0L) {
+            return 0.0;
+        }
+        long[] ascending = values.clone();
+        Arrays.sort(ascending);
+        int count = Math.max(1, values.length * percent / 100);
+        long top = 0L;
+        for (int i = ascending.length - 1; i >= 0 && i >= ascending.length - count; i--) {
+            top += ascending[i];
+        }
+        return (double) top / total;
+    }
+
     /** Score reproduit à froid — sert d'oracle croisé avec le calculateur de production. */
     public long softScore() {
         long soft = 0L;
@@ -177,7 +269,8 @@ public final class SlackReporter {
         out.append(distributionLine(label, "to_completion", slackToCompletion));
         out.append(latenessLine(label));
         out.append(costSplitLine(label));
-        out.append(criticalityByMachineLine(label, slackToDue));
+        out.append(criticalityByMachineLine(label));
+        out.append(RegimeDetector.detect(this).describe(label));
         return out.toString();
     }
 
@@ -190,17 +283,10 @@ public final class SlackReporter {
      * chose que ce rapport doit imprimer, et la condition de validité de tout le reste.
      */
     private String loadLine(String label) {
-        long totalWork = 0L;
-        for (Operation op : solution.getOperationList()) {
-            totalWork += op.getDurationSeconds();
-        }
+        long totalWork = totalWorkSeconds();
         int machineCount = solution.getMachineList().size();
-        long horizon = 0L;
-        long makespan = 0L;
-        for (Order order : solution.getOrderList()) {
-            horizon = Math.max(horizon, order.getRequiredDueEpochSec() - origin);
-            makespan = Math.max(makespan, orderCompletion[(int) order.getId()] - origin);
-        }
+        long horizon = horizonSeconds();
+        long makespan = makespanSeconds();
         double workPerMachine = (double) totalWork / machineCount;
         return String.format(
                 "load[%s] total_work_s=%d work_per_machine_s=%.0f horizon_s=%d makespan_s=%d "
@@ -268,20 +354,9 @@ public final class SlackReporter {
      * presque rien — deux architectures de solveur opposées.
      */
     private String costSplitLine(String label) {
-        long earlinessCost = 0L;
-        long tardinessCost = 0L;
-        for (Order order : solution.getOrderList()) {
-            long completion = orderCompletion[(int) order.getId()];
-            long cost = computeOrderCost(order, completion);
-            if (completion > order.getRequiredDueEpochSec()) {
-                tardinessCost += cost;
-            } else {
-                earlinessCost += cost;
-            }
-        }
-        long total = earlinessCost + tardinessCost;
+        CostSplit split = costSplit();
         return String.format("cost_split[%s] earliness=%d tardiness=%d earliness_share=%.1f%%%n",
-                label, earlinessCost, tardinessCost, total == 0L ? 0.0 : 100.0 * earlinessCost / total);
+                label, split.earliness(), split.tardiness(), 100.0 * split.earlinessShare());
     }
 
     /**
@@ -289,37 +364,19 @@ public final class SlackReporter {
      * puis la part portée par les machines les plus chargées en criticité. Une criticité
      * étalée sur toutes les machines prive L6 et R3 de leur objet.
      */
-    private String criticalityByMachineLine(String label, long[] slackToDue) {
-        int machineCount = solution.getMachineList().size();
-        long[] criticalByMachine = new long[machineCount];
-        long totalCritical = 0L;
-        for (Operation op : solution.getOperationList()) {
-            if (slackToDue[idx(op)] <= 0L) {
-                criticalByMachine[(int) op.getMachineId()]++;
-                totalCritical++;
-            }
-        }
-        long[] sortedDesc = criticalByMachine.clone();
-        Arrays.sort(sortedDesc);
-        long top1 = topShare(sortedDesc, Math.max(1, machineCount / 100));
-        long top5 = topShare(sortedDesc, Math.max(1, machineCount / 20));
-        long top10 = topShare(sortedDesc, Math.max(1, machineCount / 10));
+    private String criticalityByMachineLine(String label) {
+        long[] criticalByMachine = criticalOperationCountByMachine();
+        long totalCritical = Arrays.stream(criticalByMachine).sum();
         long machinesWithCritical = Arrays.stream(criticalByMachine).filter(c -> c > 0L).count();
         return String.format(
                 "criticality[%s] critical_ops=%d machines_touched=%d/%d "
-                        + "top1pct_share=%.1f%% top5pct_share=%.1f%% top10pct_share=%.1f%%%n",
-                label, totalCritical, machinesWithCritical, machineCount,
-                totalCritical == 0 ? 0.0 : 100.0 * top1 / totalCritical,
-                totalCritical == 0 ? 0.0 : 100.0 * top5 / totalCritical,
-                totalCritical == 0 ? 0.0 : 100.0 * top10 / totalCritical);
-    }
-
-    private static long topShare(long[] ascending, int count) {
-        long sum = 0L;
-        for (int i = ascending.length - 1; i >= 0 && i >= ascending.length - count; i--) {
-            sum += ascending[i];
-        }
-        return sum;
+                        + "top1pct_share=%.1f%% top5pct_share=%.1f%% top10pct_share=%.1f%% "
+                        + "concentration_ratio=%.2f%n",
+                label, totalCritical, machinesWithCritical, solution.getMachineList().size(),
+                100.0 * topShareOf(criticalByMachine, 1),
+                100.0 * topShareOf(criticalByMachine, 5),
+                100.0 * topShareOf(criticalByMachine, 10),
+                RegimeDetector.concentrationRatio(criticalByMachine, operationCountByMachine()));
     }
 
     private static long percentile(long[] ascending, int percent) {
