@@ -133,6 +133,10 @@ public final class FullRunner {
                 .describe("arrivee"));
 
         long endCost = -solved.getScore().getSoftScore();
+        // `moves_per_sec` compte les MOUVEMENTS ÉVALUÉS, pas les propagations : chaque
+        // mouvement en coûte environ 2,7 — l'appliquer, l'annuler, et rejouer celui qui est
+        // retenu à chaque pas. L'ancien nom `moves` désignait les propagations et laissait lire
+        // un débit trois fois trop élevé.
         long calls = FullScoreCalculator.CALCULATE_SCORE_CALLS.get();
         long propagations = Math.max(1L, FullScoreCalculator.PROPAGATIONS.get());
         long dirty = FullScoreCalculator.DIRTY_OPERATIONS.get();
@@ -155,10 +159,11 @@ public final class FullRunner {
             verdict = "WORSE_BOTH";
         }
         System.out.printf(
-                "full_result variant=%s orders=%d seconds=%.2f dps=%.1f moves=%d "
+                "full_result variant=%s orders=%d seconds=%.2f moves_per_sec=%.1f propagations=%d "
                         + "start_cost_chf=%.0f end_cost_chf=%.0f soft_reduction_pct=%.2f "
                         + "hard_start=%d hard_end=%d hard_reduction_pct=%.2f verdict=%s "
-                        + "dirty_per_move=%.1f order_changes_per_move=%.1f cost_relevant_pct=%.2f%n",
+                        + "dirty_per_propagation=%.1f order_changes_per_propagation=%.1f"
+                        + " cost_relevant_pct=%.2f%n",
                 variant, orderCount, elapsed, calls / elapsed, propagations,
                 startCost / 100.0, endCost / 100.0,
                 startCost == 0L ? 0.0 : 100.0 * (startCost - endCost) / (double) startCost,

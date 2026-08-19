@@ -65,6 +65,11 @@ public class ResourceReassignmentPhaseCommand implements CustomPhaseCommand<JobS
             if (!applied) {
                 continue;
             }
+            // Compté sur le MÊME compteur que le sélecteur : une réaffectation faite par un
+            // autre chemin reste une réaffectation. Ne compter que le chemin du sélecteur faisait
+            // afficher « reassignments=0 » pour cette variante, ce qui donne une ABSENCE à lire
+            // là où il y a une insuffisance — trouvé par l'opérateur sur le relevé de M4.
+            CriticalPairMoveIteratorFactory.REASSIGNMENTS_EMITTED.incrementAndGet();
             if (calculator.calculateScore().compareTo(before) >= 0) {
                 accepted++;
             } else {
