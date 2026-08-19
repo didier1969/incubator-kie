@@ -315,7 +315,13 @@ public class VerticalSliceIncrementalScoreCalculator
         return (int) op.getId();
     }
 
-    private long computeOrderCost(Order order, long completionEpochSec) {
+    /**
+     * Source unique de la formule de coût d'un ordre (GUI-PRO-013). Rendue statique et
+     * visible du paquet pour que {@link SlackReporter} la réutilise au lieu de la
+     * recopier — deux formules de coût qui divergent silencieusement rendraient toute
+     * mesure de marge incomparable au score.
+     */
+    static long computeOrderCost(Order order, long completionEpochSec) {
         float hoursLateOrEarly = (completionEpochSec - order.getRequiredDueEpochSec()) / 3600f;
         float cost = CostKernel.cost(order.getPriorityWeight(), K, hoursLateOrEarly);
         return Math.round((double) cost);
