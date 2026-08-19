@@ -55,24 +55,49 @@ class BenchCalibrationTest {
     }
 
     @Test
-    void noOrderIsDueBeforeItsOwnRoutingCanPossiblyFinish() {
-        // Un ordre dû avant que sa propre gamme puisse s'exécuter est en retard quoi que fasse le
-        // système. Mesurer son retard revient à mesurer de l'infaisabilité, pas de la qualité
-        // d'ordonnancement.
-        JobShopSolution solution = FullDataGenerator.generate(400, 11L);
-        int feasible = 0;
-        for (Order order : solution.getOrderList()) {
-            long machining = 0L;
-            for (Operation op : order.getOperations()) {
-                machining += op.getDurationSeconds();
-            }
-            long available = order.getDueEpochSec() - FullDataGenerator.ORIGIN_EPOCH;
-            assertTrue(available >= machining,
-                    "l'ordre " + order.getId() + " est dû dans " + available / 3600 + " h alors"
-                            + " que son seul usinage en demande " + machining / 3600);
-            feasible++;
+    void theBacklogCarriesOrdersAlreadyOverdueAndOthersStillAchievable() {
+        // Correction opérateur : « certains ordres peuvent être dus dans le passé, c'est
+        // fréquent ». La contrainte « date due au moins égale au temps de traversée » qui figurait
+        // ici était FAUSSE, et elle effaçait précisément la population la plus intéressante — un
+        // carnet réel porte toujours des ordres en retard au moment où on le replanifie.
+        //
+        // Ce qui reste vrai, et que le modèle garantit : rien n'est PLANIFIÉ dans le passé.
+        JobShopSolution solution = FullDataGenerator.generate(600, 11L);
+        long overdue = solution.getOrderList().stream()
+                .filter(order -> order.getDueEpochSec() < FullDataGenerator.ORIGIN_EPOCH)
+                .count();
+        assertTrue(overdue > 0, "un carnet réel porte des ordres déjà en retard, vus " + overdue);
+        assertTrue(overdue < solution.getOrderList().size() / 2,
+                "mais pas la moitié du carnet, vus " + overdue);
+
+        long achievable = solution.getOrderList().stream()
+                .filter(order -> {
+                    long machining = order.getOperations().stream()
+                            .mapToLong(Operation::getDurationSeconds).sum();
+                    return order.getDueEpochSec() - FullDataGenerator.ORIGIN_EPOCH >= machining;
+                })
+                .count();
+        assertTrue(achievable > solution.getOrderList().size() / 2,
+                "la majorité du carnet doit rester atteignable, sinon on mesure de"
+                        + " l'infaisabilité et non de l'ordonnancement : " + achievable + "/"
+                        + solution.getOrderList().size());
+    }
+
+    @Test
+    void nothingIsEverScheduledBeforeTheOrigin() {
+        // « Rien ne peut être planifié dans le passé. » L'origine est l'instant de
+        // replanification ; l'horizon glisse toutes les quinze minutes (PIL-KKI-005), donc cette
+        // borne se déplace, mais elle n'est jamais franchie.
+        JobShopSolution solution = FullDataGenerator.generate(300, 23L);
+        FullScoreCalculator calculator = new FullScoreCalculator();
+        calculator.resetWorkingSolution(solution);
+        for (Operation op : solution.getOperationList()) {
+            int opId = (int) op.getId();
+            assertTrue(calculator.setupStartOf(opId) >= FullDataGenerator.ORIGIN_EPOCH,
+                    op + " commence sa mise en train avant l'origine");
+            assertTrue(calculator.startOf(opId) >= FullDataGenerator.ORIGIN_EPOCH,
+                    op + " est planifiée dans le passé");
         }
-        assertTrue(feasible > 0, "aucun ordre vérifié");
     }
 
     @Test

@@ -87,7 +87,10 @@ public final class FullRunner {
                 100.0 * (randomOrderCost - startCost) / (double) randomOrderCost);
         System.out.print(oracle.coldSweep().describe("depart"));
         System.out.print(oracle.backwardSweep().describe("depart", startCost));
-        System.out.print(oracle.resourceUsage().describe("depart"));
+        // La capacité se compte sur l'HORIZON DE PLANIFICATION et non sur le makespan : un
+        // atelier qui met huit ans à écouler six mois de carnet est chargé à seize cents pour
+        // cent, pas à cent.
+        System.out.print(oracle.resourceUsage(FullDataGenerator.horizonSeconds).describe("depart"));
         System.out.print(oracle.latenessProfile("depart"));
 
         ScoreDirectorFactoryConfig scoreDirectorFactoryConfig = new ScoreDirectorFactoryConfig();
@@ -115,7 +118,8 @@ public final class FullRunner {
         System.out.print(oracle.coldSweep().describe("arrivee"));
         System.out.print(oracle.backwardSweep()
                 .describe("arrivee", -oracle.fullSweepScore().getSoftScore()));
-        System.out.print(oracle.resourceUsage().describe("arrivee"));
+        System.out.print(oracle.resourceUsage(FullDataGenerator.horizonSeconds)
+                .describe("arrivee"));
 
         long endCost = -solved.getScore().getSoftScore();
         long calls = FullScoreCalculator.CALCULATE_SCORE_CALLS.get();

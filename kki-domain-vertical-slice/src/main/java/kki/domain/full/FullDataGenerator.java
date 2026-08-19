@@ -75,10 +75,16 @@ public final class FullDataGenerator {
     public static int levels = 10;
     /** Machines par (technologie, niveau). */
     public static int machinesPerLevel = 20;
-    /** Durée minimale d'une opération : 5 h (REQ-KKI-010). */
-    public static long minDurationSeconds = 5L * 3600L;
-    /** Étendue au-dessus du minimum : 16 h, soit 5 h à 21 h. */
-    public static long durationSpreadSeconds = 16L * 3600L;
+    /**
+     * Durée d'usinage : 8 h à 23 h.
+     *
+     * <p>
+     * CALIBRÉE, pas posée : bissection sur la charge nominale mesurée jusqu'à ce que la moyenne
+     * des postes atteigne les quatre-vingts pour cent de la zone cible. La valeur précédente
+     * (5 h à 21 h) venait d'un calage de volumétrie et laissait l'atelier à 113 %.
+     */
+    public static long minDurationSeconds = 8L * 3600L;
+    public static long durationSpreadSeconds = 15L * 3600L;
     /** Exposant de la loi sur le niveau technologique requis. 2 = les articles simples dominent. */
     public static double levelDemandSkew = 2.0;
     /**
@@ -90,25 +96,17 @@ public final class FullDataGenerator {
      * poser à l'opérateur.
      *
      * <p>
-     * Le point de départ est une borne de conservation du travail : 17 489 mises en train de
-     * 16 h demandent 279 824 h, un metteur en offre 624 sur l'horizon, d'où un plancher de 449,
-     * doublé à 900 pour l'imperfection d'ordonnancement.
+     * CALIBRÉ par bissection sur la charge MESURÉE, dans l'intervalle que l'opérateur borne
+     * lui-même : au moins un par technologie, et « neuf cents, c'est beaucoup trop ». Retenu :
+     * 242 metteurs pour une charge de 77 %.
      *
      * <p>
-     * <b>Ce n'est PAS une calibration, et il faut le dire.</b> Cette borne ne prouve rien sur la
-     * faisabilité du carnet : elle ne regarde que l'occupation du METTEUR, alors que ce qui sature
-     * est le temps MUR pendant lequel la MACHINE attend. La mesure le confirme — à 900 metteurs
-     * l'offre dépasse déjà la demande d'un facteur deux, et pourtant 99,9 % des ordres sont en
-     * retard ; la bisection ne trouve aucun seuil jusqu'à 14 400. 900 est donc simplement le
-     * point où le metteur CESSE d'être la contrainte qui mord, et où la concentration de la
-     * demande sur le bas de l'échelle prend le relais — un facteur 9 que l'équilibrage ascendant
-     * récupère (commande `balance`).
-     *
-     * <p>
-     * La valeur précédente — 40 — était un chiffre posé au jugé. Elle plaçait tous les ordres à
-     * treize ans de retard et écrasait le paysage de coût sous un terme unique.
+     * La borne arithmétique « heures de travail à fournir / heures offertes par metteur » n'a PAS
+     * servi de réponse. Elle ne regarde que la conservation du travail, quand ce qui sature est le
+     * temps MUR pendant lequel la machine attend son metteur ; deux chiffres obtenus ainsi ont
+     * déjà dû être retirés. Elle sert de point de départ, la mesure tranche.
      */
-    public static int setterCount = 900;
+    public static int setterCount = 242;
     /** Nombre de technologies que chaque metteur sait régler. 1 = spécialiste, 5 = polyvalent. */
     public static int setterSkillBreadth = 2;
     /**
@@ -157,6 +155,14 @@ public final class FullDataGenerator {
      * l'infaisabilité.
      */
     public static double dueSlackFactor = 0.2;
+    /**
+     * Part des ordres DÉJÀ en retard au moment de la replanification. « Certains ordres peuvent
+     * être dus dans le passé, c'est fréquent » — et l'horizon glissant de `PIL-KKI-005` en
+     * fabrique en permanence : ce qui n'a pas été fait hier est en retard aujourd'hui.
+     */
+    public static double overdueShare = 0.12;
+    /** Profondeur maximale du retard déjà constitué. */
+    public static long overdueDepthSeconds = 21L * 24 * 3600L;
 
     /**
      * Restaure toutes les dimensions à leur valeur de référence.
@@ -178,10 +184,10 @@ public final class FullDataGenerator {
         technologies = 5;
         levels = 10;
         machinesPerLevel = 20;
-        minDurationSeconds = 5L * 3600L;
-        durationSpreadSeconds = 16L * 3600L;
+        minDurationSeconds = 8L * 3600L;
+        durationSpreadSeconds = 15L * 3600L;
         levelDemandSkew = 2.0;
-        setterCount = 900;
+        setterCount = 242;
         setterSkillBreadth = 2;
         setterWorkingDays = 5;
         setterWindowSeconds = 8L * 3600L;
@@ -198,6 +204,8 @@ public final class FullDataGenerator {
         hardFreezeHorizonSeconds = 7L * 24 * 3600L;
         hardFreezeShare = 0.5;
         dueSlackFactor = 0.2;
+        overdueShare = 0.12;
+        overdueDepthSeconds = 21L * 24 * 3600L;
     }
 
     public static JobShopSolution generate(int orderCount, long seed) {
@@ -310,15 +318,27 @@ public final class FullDataGenerator {
             int articleId = random.nextInt(articleCount);
             Routing routing = routings.get(articleId);
             int priorityWeight = 1 + random.nextInt(5);
-            // La date due ne peut pas précéder le temps de traversée de l'ordre : un ordre dû
-            // avant que sa propre gamme puisse être exécutée est en retard quoi que fasse le
-            // système, et mesurer son retard revient à mesurer de l'infaisabilité. On borne donc
-            // par la traversée majorée d'une marge, puis on étale jusqu'à l'horizon.
-            long traversal = traversalSeconds(routing, setupMatrix, articleId);
-            long earliestDue = (long) (traversal * (1.0 + dueSlackFactor));
+            // Les dates dues PEUVENT être dans le passé, et ça n'a rien d'anormal : l'opérateur
+            // le dit fréquent. Un carnet réel porte toujours des ordres en retard au moment où on
+            // le replanifie — ce sont même ceux qui comptent le plus. Ce qui est interdit, c'est
+            // de PLANIFIER dans le passé, et le modèle le garantit déjà : aucune date de début
+            // n'est antérieure à l'origine.
+            //
+            // La borne « date due au moins égale au temps de traversée » qui figurait ici était
+            // donc fausse, et elle effaçait précisément la population la plus intéressante.
             double urgency = random.nextDouble();
-            long due = ORIGIN_EPOCH + earliestDue
-                    + (long) (urgency * Math.max(0L, horizonSeconds - earliestDue));
+            long due;
+            if (urgency < overdueShare) {
+                // Déjà en retard à l'instant de la replanification.
+                double lateness = (urgency / Math.max(1e-9, overdueShare));
+                due = ORIGIN_EPOCH - (long) ((1.0 - lateness) * overdueDepthSeconds);
+            } else {
+                double position = (urgency - overdueShare) / Math.max(1e-9, 1.0 - overdueShare);
+                long traversal = traversalSeconds(routing, setupMatrix, articleId);
+                long earliestDue = (long) (traversal * (1.0 + dueSlackFactor));
+                due = ORIGIN_EPOCH
+                        + (long) (position * Math.max(earliestDue, horizonSeconds));
+            }
             Order.FreezeLevel freeze = freezeLevelOf(urgency, random);
             // Plan de référence : la date due elle-même sert de dernier plan publié — c'est la
             // référence la plus défavorable au solveur, donc la plus honnête pour mesurer.

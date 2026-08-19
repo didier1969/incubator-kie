@@ -105,9 +105,10 @@ class FullScoreCalculatorTest {
 
     @Test
     void setupDurationsMatchTheObservedRange() {
-        // CPT-KKI-006 : 2 h minimum, 48 h maximum (rare), 16 h le cas courant. Le générateur
-        // précédent tirait 10 min à 1 h 40 — un ordre de grandeur trop court, ce qui vidait de
-        // son sens le piège du calendrier metteur.
+        // Fourchette REVUE par l'opérateur : « au total entre 2 h et 24 h selon très différents
+        // ou pas ». La version précédente montait à 48 h, et surtout tirait la durée au hasard
+        // au lieu de la composer — d'où une médiane posée à 16 h par décret. Elle résulte
+        // désormais des quatre postes réels : préparation, démontage, montage, réglage.
         SetupMatrix matrix = new SetupMatrix(40, 6, 11L);
         List<Long> durations = new java.util.ArrayList<>();
         for (int from = 0; from < 240; from++) {
@@ -120,14 +121,10 @@ class FullScoreCalculatorTest {
         java.util.Collections.sort(durations);
         long median = durations.get(durations.size() / 2);
         assertTrue(durations.get(0) >= 2 * 3600L, "plancher 2 h, mesuré " + durations.get(0));
-        assertTrue(durations.get(durations.size() - 1) <= 48 * 3600L,
-                "plafond 48 h, mesuré " + durations.get(durations.size() - 1));
-        assertTrue(median >= 14 * 3600L && median <= 18 * 3600L,
-                "le cas courant doit être autour de 16 h, médiane mesurée " + median / 3600.0 + " h");
-        long heavy = durations.stream().filter(d -> d > 24 * 3600L).count();
-        assertTrue(100.0 * heavy / durations.size() < 8.0,
-                "les mises en train de plus de 24 h doivent rester rares, mesuré "
-                        + (100.0 * heavy / durations.size()) + " %");
+        assertTrue(durations.get(durations.size() - 1) <= 24 * 3600L,
+                "plafond 24 h, mesuré " + durations.get(durations.size() - 1) / 3600.0 + " h");
+        assertTrue(median >= 5 * 3600L && median <= 20 * 3600L,
+                "la médiane doit tomber dans la fourchette, mesurée " + median / 3600.0 + " h");
     }
 
     @Test

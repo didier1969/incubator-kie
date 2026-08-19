@@ -412,9 +412,12 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
      */
     private long setupSecondsOf(int opId) {
         int machinePredecessor = prevOnMachineId[opId];
+        // La technologie du POSTE entre dans le calcul : la préparation n'est pas la même sur
+        // un tour automatique et sur une rectifieuse.
+        int technology = opById[opId].getMachine().getTechnology();
         return machinePredecessor >= 0
                 ? setupMatrix.secondsBetween(opById[machinePredecessor].getSetupKey(),
-                        opById[opId].getSetupKey())
+                        opById[opId].getSetupKey(), technology)
                 : setupMatrix.coldStartSeconds(opById[opId].getSetupKey());
     }
 
@@ -474,7 +477,8 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                 int s = (int) op.getSetter().getId();
                 long setupSeconds = lastKeyOnMachine[m] < 0
                         ? setupMatrix.coldStartSeconds(op.getSetupKey())
-                        : setupMatrix.secondsBetween(lastKeyOnMachine[m], op.getSetupKey());
+                        : setupMatrix.secondsBetween(lastKeyOnMachine[m], op.getSetupKey(),
+                                op.getMachine().getTechnology());
                 int t = op.getTooling() == null ? -1 : (int) op.getTooling().getId();
                 long withoutTooling = Math.max(machineFree[m], setterFree[s]);
                 long setupReadyAt = t < 0 ? withoutTooling : Math.max(withoutTooling, toolingFree[t]);
