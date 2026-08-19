@@ -61,21 +61,31 @@ public final class FullDataGenerator {
     /** Exposant de la loi sur le niveau technologique requis. 2 = les articles simples dominent. */
     public static double levelDemandSkew = 2.0;
     /**
-     * Nombre de metteurs en train — CALCULÉ, jamais deviné, et surtout jamais demandé.
+     * Nombre de metteurs en train — POINT DE TRAVAIL, ajusté ici et jamais demandé.
      *
      * <p>
      * Le produit est le système APS3D ; le plan n'est que l'instrument qui sert à l'éprouver.
      * Une valeur d'instance manquante est donc une dimension à ajuster ici, pas une question à
-     * poser. Le calcul, pour 5000 ordres :
-     * <pre>
-     *   17 489 mises en train × 16 h médiane      = 279 824 h de metteur à fournir
-     *   1 metteur × 3 jours × 8 h × 26 semaines   =     624 h sur l'horizon
-     *   plancher arithmétique                     =     449 metteurs
-     *   × 2 pour l'imperfection de l'ordonnancement =   900
-     * </pre>
-     * La valeur précédente — 40 — était un chiffre posé au jugé, sur-souscrit d'un facteur 11.
-     * Elle plaçait tous les ordres à treize ans de retard et écrasait le paysage de coût sous un
-     * terme unique, rendant tout autre levier invisible à la mesure.
+     * poser à l'opérateur.
+     *
+     * <p>
+     * Le point de départ est une borne de conservation du travail : 17 489 mises en train de
+     * 16 h demandent 279 824 h, un metteur en offre 624 sur l'horizon, d'où un plancher de 449,
+     * doublé à 900 pour l'imperfection d'ordonnancement.
+     *
+     * <p>
+     * <b>Ce n'est PAS une calibration, et il faut le dire.</b> Cette borne ne prouve rien sur la
+     * faisabilité du carnet : elle ne regarde que l'occupation du METTEUR, alors que ce qui sature
+     * est le temps MUR pendant lequel la MACHINE attend. La mesure le confirme — à 900 metteurs
+     * l'offre dépasse déjà la demande d'un facteur deux, et pourtant 99,9 % des ordres sont en
+     * retard ; la bisection ne trouve aucun seuil jusqu'à 14 400. 900 est donc simplement le
+     * point où le metteur CESSE d'être la contrainte qui mord, et où la concentration de la
+     * demande sur le bas de l'échelle prend le relais — un facteur 9 que l'équilibrage ascendant
+     * récupère (commande `balance`).
+     *
+     * <p>
+     * La valeur précédente — 40 — était un chiffre posé au jugé. Elle plaçait tous les ordres à
+     * treize ans de retard et écrasait le paysage de coût sous un terme unique.
      */
     public static int setterCount = 900;
     /** Nombre de technologies que chaque metteur sait régler. 1 = spécialiste, 5 = polyvalent. */
