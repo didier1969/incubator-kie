@@ -736,6 +736,143 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         }
     }
 
+
+    // ************************************************************************
+    // Charge et capacité — ce que les ressources font vraiment
+    // ************************************************************************
+
+    /**
+     * Relevé de charge par famille de ressources, sur le plan tel qu'il est daté.
+     *
+     * <p>
+     * Le coût seul ne dit pas où va le temps. Trois grandeurs par machine, toutes en temps MUR et
+     * dont la somme fait exactement la fenêtre d'engagement de la machine :
+     * <ul>
+     * <li><b>immobilisation de mise en train</b> — de l'instant où la machine se libère à la fin
+     * de la mise en train, temps mort du calendrier metteur compris. C'est le poste que
+     * `CPT-KKI-007` désigne comme le piège du modèle ;</li>
+     * <li><b>attente de chaîne</b> — la machine est prête, l'ordre n'est pas encore arrivé ;</li>
+     * <li><b>usinage</b> — le seul temps productif, dont une part peut tomber hors des heures
+     * d'ouverture de la machine.</li>
+     * </ul>
+     *
+     * <p>
+     * Le besoin est rapporté à côté de la dotation : pour chaque famille, le nombre d'unités qui
+     * suffirait si elles étaient utilisées à cent pour cent. L'écart entre ce plancher et la
+     * dotation dit laquelle des trois familles contraint réellement le plan.
+     */
+    public ResourceUsage resourceUsage() {
+        long horizon = 0L;
+        for (int opId = 0; opId < opEnd.length; opId++) {
+            horizon = Math.max(horizon, opEnd[opId] - origin);
+        }
+
+        long setupHold = 0L;
+        long chainWait = 0L;
+        long run = 0L;
+        long machiningWork = 0L;
+        long setupWork = 0L;
+        int machinesUsed = 0;
+        long busiestMachineSpan = 0L;
+        long machineOpenSeconds = 0L;
+
+        for (int m = 0; m < operationsByMachine.length; m++) {
+            List<Operation> queue = operationsByMachine[m];
+            machineOpenSeconds += machineCalendar[m].workedSecondsBefore(origin + horizon)
+                    - machineCalendar[m].workedSecondsBefore(origin);
+            if (queue.isEmpty()) {
+                continue;
+            }
+            machinesUsed++;
+            long freeAt = origin;
+            for (Operation op : queue) {
+                int opId = (int) op.getId();
+                setupHold += setupEndAt[opId] - freeAt;
+                chainWait += opStart[opId] - setupEndAt[opId];
+                run += opEnd[opId] - opStart[opId];
+                machiningWork += op.getDurationSeconds();
+                setupWork += setupSecondsOf(opId);
+                freeAt = opEnd[opId];
+            }
+            busiestMachineSpan = Math.max(busiestMachineSpan, freeAt - origin);
+        }
+
+        int settersUsed = 0;
+        long setterOpenSeconds = 0L;
+        for (int s = 0; s < setupsBySetter.length; s++) {
+            setterOpenSeconds += setterCalendar[s].workedSecondsBefore(origin + horizon)
+                    - setterCalendar[s].workedSecondsBefore(origin);
+            if (!setupsBySetter[s].isEmpty()) {
+                settersUsed++;
+            }
+        }
+
+        int toolingsUsed = 0;
+        long toolingHold = 0L;
+        for (List<Operation> queue : setupsByTooling) {
+            if (queue.isEmpty()) {
+                continue;
+            }
+            toolingsUsed++;
+            for (Operation op : queue) {
+                int opId = (int) op.getId();
+                toolingHold += setupEndAt[opId] - setupStartAt[opId];
+            }
+        }
+
+        return new ResourceUsage(horizon, operationsByMachine.length, machinesUsed,
+                machineOpenSeconds, setupHold, chainWait, run, machiningWork,
+                busiestMachineSpan, setupsBySetter.length, settersUsed, setterOpenSeconds,
+                setupWork, setupsByTooling.length, toolingsUsed, toolingHold);
+    }
+
+    /** Un relevé de charge ; toutes les durées sont en secondes. */
+    public record ResourceUsage(long horizonSeconds, int machines, int machinesUsed,
+            long machineOpenSeconds, long machineSetupHold, long machineChainWait,
+            long machineRun, long machiningWork, long busiestMachineSpan,
+            int setters, int settersUsed, long setterOpenSeconds, long setterWork,
+            int toolings, int toolingsUsed, long toolingHold) {
+
+        /** Machines qu'il faudrait si elles étaient prises à cent pour cent du temps d'ouverture. */
+        public double machinesNeeded() {
+            double perMachine = (double) machineOpenSeconds / Math.max(1, machines);
+            return (machineSetupHold + machineRun) / Math.max(1.0, perMachine);
+        }
+
+        public double settersNeeded() {
+            double perSetter = (double) setterOpenSeconds / Math.max(1, setters);
+            return setterWork / Math.max(1.0, perSetter);
+        }
+
+        public double toolingsNeeded() {
+            return toolingHold / Math.max(1.0, horizonSeconds);
+        }
+
+        public String describe(String label) {
+            double hours = 3600.0;
+            long engaged = machineSetupHold + machineChainWait + machineRun;
+            return String.format(
+                    "resources[%s] horizon_d=%.0f busiest_machine_d=%.0f%n"
+                            + "  machines   dotation=%d utilisees=%d necessaires=%.0f"
+                            + " | mise_en_train=%.1f%% attente_chaine=%.1f%% usinage=%.1f%%"
+                            + " (dont productif=%.1f%%)%n"
+                            + "  metteurs   dotation=%d utilises=%d necessaires=%.0f"
+                            + " | charge=%.1f%% des heures ouvertes%n"
+                            + "  outillages dotation=%d utilises=%d necessaires=%.0f"
+                            + " | immobilisation=%.1f%% de l_horizon%n",
+                    label, horizonSeconds / 86_400.0, busiestMachineSpan / 86_400.0,
+                    machines, machinesUsed, machinesNeeded(),
+                    100.0 * machineSetupHold / Math.max(1L, engaged),
+                    100.0 * machineChainWait / Math.max(1L, engaged),
+                    100.0 * machineRun / Math.max(1L, engaged),
+                    100.0 * machiningWork / Math.max(1L, engaged),
+                    setters, settersUsed, settersNeeded(),
+                    100.0 * setterWork / Math.max(1L, setterOpenSeconds),
+                    toolings, toolingsUsed, toolingsNeeded(),
+                    100.0 * toolingHold / Math.max(1L, (long) toolings * horizonSeconds));
+        }
+    }
+
     // ************************************************************************
     // Lecture des arcs tendus pour le sélecteur guidé
     // ************************************************************************

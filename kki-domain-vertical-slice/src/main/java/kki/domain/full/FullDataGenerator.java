@@ -271,11 +271,27 @@ public final class FullDataGenerator {
             compatibleByTechAndLevel.add(byLevel);
         }
 
+        // GAMMES — une par ARTICLE, pas une par ordre.
+        //
+        // `PIL-KKI-004` : « ordres = chaînes séquentielles de 1 à 6 opérations pour UN article ».
+        // La gamme — nombre de passes, technologie, niveau requis, durée, machine de référence —
+        // est une propriété de ce qu'on fabrique, pas de la commande qui le demande. Tirer une
+        // gamme par ordre rendait `setup(A→A) = 0` de `CPT-KKI-006` INATTEIGNABLE : deux ordres
+        // du même article n'avaient aucune raison de se croiser sur une machine, donc chaque
+        // opération payait toujours une mise en train pleine. Mesuré avant correction : 81,5 %
+        // du temps machine en mise en train contre 1,3 % en usinage, et grouper les ordres par
+        // article AGGRAVAIT le plan au lieu de l'améliorer.
+        List<Routing> routings = new ArrayList<>(articleCount);
+        for (int article = 0; article < articleCount; article++) {
+            routings.add(Routing.draw(random, machines, levels, machinesPerLevel, technologies));
+        }
+
         List<Order> orders = new ArrayList<>(orderCount);
         List<Operation> operations = new ArrayList<>();
         long operationId = 0;
         for (long o = 0; o < orderCount; o++) {
             int articleId = random.nextInt(articleCount);
+            Routing routing = routings.get(articleId);
             int priorityWeight = 1 + random.nextInt(5);
             long due = ORIGIN_EPOCH + (long) (random.nextDouble() * horizonSeconds);
             Order.FreezeLevel freeze = freezeLevelOf(due, random);
@@ -283,26 +299,13 @@ public final class FullDataGenerator {
             // référence la plus défavorable au solveur, donc la plus honnête pour mesurer.
             Order order = new Order(o, articleId, priorityWeight, due, freeze, due);
 
-            int passCount = 1 + random.nextInt(maxPasses);
+            int passCount = routing.passCount();
             List<Operation> chain = new ArrayList<>(passCount);
-            List<Long> visited = new ArrayList<>();
             for (int pass = 0; pass < passCount; pass++) {
-                long duration = minDurationSeconds + (long) (random.nextDouble() * durationSpreadSeconds);
-                int technology = random.nextInt(technologies);
-                int requiredLevel = skewedLevel(random);
-                long machineId;
-                // Axe Z : une passe sur deux revient sur une machine déjà visitée par cet ordre.
-                if (!visited.isEmpty() && random.nextBoolean()) {
-                    machineId = visited.get(random.nextInt(visited.size()));
-                    Machine reused = machines.get((int) machineId);
-                    technology = reused.getTechnology();
-                    requiredLevel = reused.getLevel();
-                } else {
-                    machineId = (long) technology * levels * machinesPerLevel
-                            + (long) requiredLevel * machinesPerLevel
-                            + random.nextInt(machinesPerLevel);
-                    visited.add(machineId);
-                }
+                long duration = routing.durationSeconds()[pass];
+                int technology = routing.technology()[pass];
+                int requiredLevel = routing.requiredLevel()[pass];
+                long machineId = routing.machineId()[pass];
                 int setupKey = setupMatrix.keyOf(articleId, pass);
                 // Le type d'outillage dérive de la CLÉ de mise en train, pas de la machine : le
                 // montage appartient à ce qu'on fabrique, pas à ce sur quoi on le fabrique. Le
@@ -359,6 +362,49 @@ public final class FullDataGenerator {
             return Operation.NO_TOOLING;
         }
         return setupKey % toolingTypeCount;
+    }
+
+    /**
+     * La gamme d'un article : la même pour tous les ordres qui le demandent.
+     *
+     * <p>
+     * La machine y figure comme référence de départ, pas comme verrou — c'est une décision que le
+     * système peut reprendre par substitution ascendante. Ce qui est FIXE, c'est la technologie,
+     * le niveau exigé et la durée : ils décrivent ce qu'il faut faire à la pièce.
+     */
+    private record Routing(int passCount, int[] technology, int[] requiredLevel,
+            long[] durationSeconds, long[] machineId) {
+
+        static Routing draw(Random random, List<Machine> machines, int levels,
+                int machinesPerLevel, int technologies) {
+            int passCount = 1 + random.nextInt(maxPasses);
+            int[] technology = new int[passCount];
+            int[] requiredLevel = new int[passCount];
+            long[] durationSeconds = new long[passCount];
+            long[] machineId = new long[passCount];
+            List<Long> visited = new ArrayList<>();
+            for (int pass = 0; pass < passCount; pass++) {
+                durationSeconds[pass] = minDurationSeconds
+                        + (long) (random.nextDouble() * durationSpreadSeconds);
+                int tech = random.nextInt(technologies);
+                int level = skewedLevel(random);
+                // Axe Z : une passe sur deux revient sur une machine déjà visitée par la gamme.
+                if (!visited.isEmpty() && random.nextBoolean()) {
+                    machineId[pass] = visited.get(random.nextInt(visited.size()));
+                    Machine reused = machines.get((int) machineId[pass]);
+                    tech = reused.getTechnology();
+                    level = reused.getLevel();
+                } else {
+                    machineId[pass] = (long) tech * levels * machinesPerLevel
+                            + (long) level * machinesPerLevel
+                            + random.nextInt(machinesPerLevel);
+                    visited.add(machineId[pass]);
+                }
+                technology[pass] = tech;
+                requiredLevel[pass] = level;
+            }
+            return new Routing(passCount, technology, requiredLevel, durationSeconds, machineId);
+        }
     }
 
     /**

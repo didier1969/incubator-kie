@@ -1,6 +1,7 @@
 package kki.domain.full;
 
 import java.util.Comparator;
+import java.util.List;
 import java.util.function.DoubleConsumer;
 import java.util.function.IntConsumer;
 
@@ -36,6 +37,7 @@ public final class ParameterSweepRunner {
             case "sweep" -> sweep(orderCount);
             case "combined" -> combined(orderCount);
             case "balance" -> balance(orderCount);
+            case "grouping" -> grouping(orderCount);
             case "solve" -> solve(orderCount, args.length > 2 ? Long.parseLong(args[2]) : 60L);
             default -> throw new IllegalArgumentException("commande inconnue : " + command);
         }
@@ -190,6 +192,40 @@ public final class ParameterSweepRunner {
         FullDataGenerator.setterWindowStartSeconds = 0L;
         for (int orders : new int[] { orderCount / 2, orderCount / 5, orderCount / 10 }) {
             System.out.print(measure(orders).describe("all_relaxed+orders=" + orders));
+        }
+        FullDataGenerator.reset();
+    }
+
+    /**
+     * Teste l'hypothèse que le relevé de charge désigne : le plan est dominé par les MISES EN
+     * TRAIN, pas par l'usinage.
+     *
+     * <p>
+     * Le relevé donne 81,5 % du temps machine en immobilisation de mise en train contre 1,3 % en
+     * usinage. Or la matrice de `CPT-KKI-006` rend la mise en train NULLE entre deux opérations de
+     * clé (article, passe) identique. Avec deux cents articles pour cinq mille ordres, enchaîner
+     * sur une machine les ordres d'un même article supprimerait la plupart des mises en train —
+     * c'est le mouvement (3) de `CPT-KKI-010`, « grouper / dégrouper ».
+     *
+     * <p>
+     * On compare donc trois ordonnancements de la séquence X, sans rien changer d'autre : par
+     * date due (la référence honnête), par article, et par article puis date due.
+     */
+    private static void grouping(int orderCount) {
+        FullDataGenerator.reset();
+        for (String policy : new String[] { "due_date", "article", "article_then_due" }) {
+            JobShopSolution problem = FullDataGenerator.generate(orderCount, 42L);
+            List<Order> sequence = problem.getScheduleList().get(0).getOrderSequence();
+            sequence.sort(switch (policy) {
+                case "article" -> Comparator.comparingInt(Order::getArticleId);
+                case "article_then_due" -> Comparator.comparingInt(Order::getArticleId)
+                        .thenComparingLong(Order::getDueEpochSec);
+                default -> Comparator.comparingLong(Order::getDueEpochSec);
+            });
+            FullScoreCalculator calculator = new FullScoreCalculator();
+            calculator.resetWorkingSolution(problem);
+            System.out.print(regimeOf(problem).describe("sequence=" + policy));
+            System.out.print(calculator.resourceUsage().describe("sequence=" + policy));
         }
         FullDataGenerator.reset();
     }
