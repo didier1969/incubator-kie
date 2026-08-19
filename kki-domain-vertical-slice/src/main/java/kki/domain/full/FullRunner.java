@@ -2,10 +2,11 @@ package kki.domain.full;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 
 import org.optaplanner.core.api.solver.SolverManager;
 import org.optaplanner.core.config.heuristic.selector.move.MoveSelectorConfig;
-import org.optaplanner.core.config.heuristic.selector.move.generic.list.ListSwapMoveSelectorConfig;
+import org.optaplanner.core.config.heuristic.selector.move.factory.MoveIteratorFactoryConfig;
 import org.optaplanner.core.config.localsearch.LocalSearchPhaseConfig;
 import org.optaplanner.core.config.score.director.ScoreDirectorFactoryConfig;
 import org.optaplanner.core.config.solver.SolverConfig;
@@ -29,9 +30,18 @@ public final class FullRunner {
     private FullRunner() {
     }
 
+    /** Jeu de mouvements activé, pour décomposer le gain par incrément (A4). */
+    public enum Variant {
+        /** M1 seul — échange de deux positions X tirées au hasard. Référence REQ-KKI-012. */
+        M1,
+        /** M3 — mêmes échanges, mais guidés vers les arcs disjonctifs tendus. */
+        M3
+    }
+
     public static void main(String[] args) throws Exception {
         int orderCount = args.length > 0 ? Integer.parseInt(args[0]) : 5000;
         long seconds = args.length > 1 ? Long.parseLong(args[1]) : 60L;
+        Variant variant = args.length > 2 ? Variant.valueOf(args[2]) : Variant.M3;
 
         JobShopSolution problem = FullDataGenerator.generate(orderCount, 42L);
         System.out.printf("full_instance orders=%d operations=%d machines=%d%n",
@@ -61,7 +71,7 @@ public final class FullRunner {
         termination.setSecondsSpentLimit(seconds);
         LocalSearchPhaseConfig localSearch = new LocalSearchPhaseConfig();
         localSearch.setTerminationConfig(termination);
-        localSearch.setMoveSelectorConfig(swapOnly());
+        localSearch.setMoveSelectorConfig(moveSelectorOf(variant));
 
         SolverConfig solverConfig = new SolverConfig();
         solverConfig.setSolutionClass(JobShopSolution.class);
@@ -88,11 +98,11 @@ public final class FullRunner {
         long orderChanges = FullScoreCalculator.ORDER_COMPLETION_CHANGES.get();
 
         System.out.printf(
-                "full_result orders=%d seconds=%.2f dps=%.1f moves=%d "
+                "full_result variant=%s orders=%d seconds=%.2f dps=%.1f moves=%d "
                         + "start_cost_chf=%.0f end_cost_chf=%.0f reduction_pct=%.2f "
                         + "hard_start=%d hard_end=%d "
                         + "dirty_per_move=%.1f order_changes_per_move=%.1f cost_relevant_pct=%.2f%n",
-                orderCount, elapsed, calls / elapsed, propagations,
+                variant, orderCount, elapsed, calls / elapsed, propagations,
                 startCost / 100.0, endCost / 100.0,
                 startCost == 0L ? 0.0 : 100.0 * (startCost - endCost) / (double) startCost,
                 startHard, -solved.getScore().getHardScore(),
@@ -100,8 +110,29 @@ public final class FullRunner {
                 dirty == 0L ? 0.0 : 100.0 * orderChanges / dirty);
     }
 
-    /** M1 seul : échange de deux positions X, chaînes comprises. */
-    private static MoveSelectorConfig<?> swapOnly() {
-        return new ListSwapMoveSelectorConfig();
+    /**
+     * M1 = échange X uniforme · M2 = changement de machine compatible · M3 = échange X guidé vers
+     * les arcs tendus. M3 remplace M1 plutôt que de s'y ajouter : les deux produisent le même type
+     * de mouvement, l'un au hasard et l'autre en sachant pourquoi.
+     */
+    private static MoveSelectorConfig<?> moveSelectorOf(Variant variant) {
+        return switch (variant) {
+            case M1 -> swapSelector(false);
+            case M3 -> swapSelector(true);
+        };
     }
+
+    /**
+     * L'échange X passe par notre propre fabrique dans les deux modes. Avec deux classes
+     * d'entités, le {@code ListSwapMoveSelector} d'OptaPlanner ne sait plus déduire l'entité à
+     * laquelle il s'applique — mais surtout, comparer M1 et M3 exige que seul le CHOIX de la
+     * paire diffère, pas la mécanique du mouvement.
+     */
+    private static MoveSelectorConfig<?> swapSelector(boolean guided) {
+        MoveIteratorFactoryConfig config = new MoveIteratorFactoryConfig();
+        config.setMoveIteratorFactoryClass(CriticalPairMoveIteratorFactory.class);
+        config.setMoveIteratorFactoryCustomProperties(Map.of("guided", Boolean.toString(guided)));
+        return config;
+    }
+
 }

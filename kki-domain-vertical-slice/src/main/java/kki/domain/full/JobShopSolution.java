@@ -26,6 +26,10 @@ public class JobShopSolution {
     @ValueRangeProvider(id = "orderRange")
     private List<Order> orderList;
 
+    // L'opération reste un FAIT : cette version d'OptaPlanner ne fait pas coexister une
+    // variable-liste et une variable simple (voir Operation). Le calculateur navigue malgré tout
+    // par tableaux indexés sur l'identifiant plutôt que par références d'objet — c'est la
+    // mémoïsation du chemin chaud, et c'est aussi ce qui rendra la bascule sans risque.
     @ProblemFactCollectionProperty
     private List<Operation> operationList;
 

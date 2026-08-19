@@ -57,6 +57,24 @@ public final class FullDataGenerator {
             }
         }
 
+        // MÉMOÏSATION — la plage de valeurs de M2 ne dépend que du couple (technologie, niveau) :
+        // 50 listes partagées par les 17 515 opérations, construites une fois. Compatibilité
+        // ASCENDANTE : les niveaux égaux ou supérieurs de la technologie, jamais en dessous.
+        List<List<List<Machine>>> compatibleByTechAndLevel = new ArrayList<>(TECHNOLOGIES);
+        for (int technology = 0; technology < TECHNOLOGIES; technology++) {
+            List<List<Machine>> byLevel = new ArrayList<>(LEVELS);
+            for (int level = 0; level < LEVELS; level++) {
+                List<Machine> compatible = new ArrayList<>();
+                for (Machine machine : machines) {
+                    if (machine.canRun(technology, level)) {
+                        compatible.add(machine);
+                    }
+                }
+                byLevel.add(List.copyOf(compatible));
+            }
+            compatibleByTechAndLevel.add(byLevel);
+        }
+
         List<Order> orders = new ArrayList<>(orderCount);
         List<Operation> operations = new ArrayList<>();
         long operationId = 0;
@@ -91,7 +109,9 @@ public final class FullDataGenerator {
                 }
                 int setupKey = setupMatrix.keyOf(articleId, pass);
                 chain.add(new Operation(operationId++, order, pass, duration,
-                        technology, requiredLevel, setupKey, machineId));
+                        technology, requiredLevel, setupKey,
+                        compatibleByTechAndLevel.get(technology).get(requiredLevel),
+                        machines.get((int) machineId)));
             }
             order.setOperations(chain);
             operations.addAll(chain);
