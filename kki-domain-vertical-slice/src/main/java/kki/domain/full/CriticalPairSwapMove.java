@@ -32,9 +32,19 @@ public final class CriticalPairSwapMove extends AbstractMove<JobShopSolution> {
         this.rightIndex = Math.max(leftIndex, rightIndex);
     }
 
+    /**
+     * CPT-KKI-004 — le verrou dur est une IMMOBILISATION, pas un surcoût : « @PlanningPin, jamais
+     * déplaçable ». Un ordre déjà lancé ne bouge pas, point. Le refuser ici plutôt que le facturer
+     * change la nature de la contrainte : le solveur ne peut plus l'acheter.
+     */
     @Override
     public boolean isMoveDoable(ScoreDirector<JobShopSolution> scoreDirector) {
-        return leftIndex != rightIndex;
+        if (leftIndex == rightIndex) {
+            return false;
+        }
+        List<Order> sequence = schedule.getOrderSequence();
+        return sequence.get(leftIndex).getFreezeLevel() != Order.FreezeLevel.HARD
+                && sequence.get(rightIndex).getFreezeLevel() != Order.FreezeLevel.HARD;
     }
 
     @Override

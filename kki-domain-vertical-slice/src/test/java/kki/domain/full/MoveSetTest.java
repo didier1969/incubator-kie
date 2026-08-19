@@ -1,6 +1,7 @@
 package kki.domain.full;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -87,6 +88,48 @@ class MoveSetTest {
         assertTrue(lowLevel.getCompatibleMachines().stream()
                 .allMatch(m -> m.getTechnology() == lowLevel.getRequiredTechnology()),
                 "jamais une autre technologie");
+    }
+
+    @Test
+    void hardFrozenOrdersAreNeverProposedForMovement() {
+        // CPT-KKI-004 : « @PlanningPin, JAMAIS déplaçable ». Avant l'audit REQ-KKI-015 le verrou
+        // dur était une PÉNALITÉ : le solveur pouvait acheter le déplacement d'un ordre déjà
+        // lancé. Une contrainte qui s'achète n'est pas une contrainte.
+        JobShopSolution solution = FullDataGenerator.generate(600, 47L);
+        FullScoreCalculator calculator = new FullScoreCalculator();
+        calculator.resetWorkingSolution(solution);
+
+        Random random = new Random(53L);
+        int inspected = 0;
+        for (int attempt = 0; attempt < 600; attempt++) {
+            Order[] pair = calculator.sampleTightAdjacentPair(random);
+            if (pair == null) {
+                continue;
+            }
+            inspected++;
+            assertTrue(pair[0].getFreezeLevel() != Order.FreezeLevel.HARD
+                            && pair[1].getFreezeLevel() != Order.FreezeLevel.HARD,
+                    "le sélecteur a proposé de déplacer un ordre à verrou dur");
+        }
+        assertTrue(inspected > 50, "il faut assez de paires inspectées pour que le test morde : " + inspected);
+
+        // Et le mouvement lui-même refuse, même construit à la main : le filtre du sélecteur ne
+        // doit pas être la seule ligne de défense.
+        Schedule schedule = solution.getScheduleList().get(0);
+        List<Order> sequence = schedule.getOrderSequence();
+        int hardIndex = -1;
+        int freeIndex = -1;
+        for (int i = 0; i < sequence.size(); i++) {
+            if (hardIndex < 0 && sequence.get(i).getFreezeLevel() == Order.FreezeLevel.HARD) {
+                hardIndex = i;
+            }
+            if (freeIndex < 0 && sequence.get(i).getFreezeLevel() == Order.FreezeLevel.FREE) {
+                freeIndex = i;
+            }
+        }
+        assertTrue(hardIndex >= 0 && freeIndex >= 0, "l'instance doit fournir les deux paliers");
+        assertFalse(new CriticalPairSwapMove(schedule, hardIndex, freeIndex).isMoveDoable(null),
+                "un échange touchant un ordre à verrou dur doit être refusé, pas facturé");
     }
 
     @Test

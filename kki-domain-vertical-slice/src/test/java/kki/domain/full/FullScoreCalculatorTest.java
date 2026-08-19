@@ -82,12 +82,44 @@ class FullScoreCalculatorTest {
     }
 
     @Test
-    void setupIsFreeBetweenTwoPassesOfTheSameArticle() {
+    void setupIsFreeOnlyWhenNOTHINGChanges() {
+        // Ce test encodait l'inverse avant l'audit REQ-KKI-015 : il affirmait que deux passes du
+        // même article étaient gratuites. CPT-KKI-006 dit explicitement le contraire — « pas
+        // passe-à-passe du même article ». Un test qui encode une violation la protège.
         SetupMatrix matrix = new SetupMatrix(20, 6, 3L);
-        assertEquals(0L, matrix.secondsBetween(matrix.keyOf(7, 0), matrix.keyOf(7, 3)),
-                "deux passages du même article ne coûtent aucune mise en train");
+        assertEquals(0L, matrix.secondsBetween(matrix.keyOf(7, 2), matrix.keyOf(7, 2)),
+                "rien ne change : aucune mise en train");
+        assertTrue(matrix.secondsBetween(matrix.keyOf(7, 0), matrix.keyOf(7, 3)) > 0L,
+                "une autre passe du même article demande une VRAIE mise en train (CPT-KKI-006)");
         assertTrue(matrix.secondsBetween(matrix.keyOf(7, 0), matrix.keyOf(8, 0)) > 0L,
                 "changer d'article coûte");
+    }
+
+    @Test
+    void setupDurationsMatchTheObservedRange() {
+        // CPT-KKI-006 : 2 h minimum, 48 h maximum (rare), 16 h le cas courant. Le générateur
+        // précédent tirait 10 min à 1 h 40 — un ordre de grandeur trop court, ce qui vidait de
+        // son sens le piège du calendrier metteur.
+        SetupMatrix matrix = new SetupMatrix(40, 6, 11L);
+        List<Long> durations = new java.util.ArrayList<>();
+        for (int from = 0; from < 240; from++) {
+            for (int to = 0; to < 240; to++) {
+                if (from != to) {
+                    durations.add(matrix.secondsBetween(from, to));
+                }
+            }
+        }
+        java.util.Collections.sort(durations);
+        long median = durations.get(durations.size() / 2);
+        assertTrue(durations.get(0) >= 2 * 3600L, "plancher 2 h, mesuré " + durations.get(0));
+        assertTrue(durations.get(durations.size() - 1) <= 48 * 3600L,
+                "plafond 48 h, mesuré " + durations.get(durations.size() - 1));
+        assertTrue(median >= 14 * 3600L && median <= 18 * 3600L,
+                "le cas courant doit être autour de 16 h, médiane mesurée " + median / 3600.0 + " h");
+        long heavy = durations.stream().filter(d -> d > 24 * 3600L).count();
+        assertTrue(100.0 * heavy / durations.size() < 8.0,
+                "les mises en train de plus de 24 h doivent rester rares, mesuré "
+                        + (100.0 * heavy / durations.size()) + " %");
     }
 
     @Test

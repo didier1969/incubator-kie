@@ -357,6 +357,11 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             if (current.getOrder() == next.getOrder()) {
                 continue;
             }
+            // Un ordre à verrou dur ne se déplace pas : inutile de le proposer (CPT-KKI-004).
+            if (current.getOrder().getFreezeLevel() == Order.FreezeLevel.HARD
+                    || next.getOrder().getFreezeLevel() == Order.FreezeLevel.HARD) {
+                continue;
+            }
             // TENDU = c'est la MACHINE qui retient l'opération suivante, pas sa propre chaîne.
             // Le critère naïf « démarre quand la précédente finit » ne marche pas ici : il y a
             // toujours une mise en train entre deux opérations d'une ressource, donc l'égalité

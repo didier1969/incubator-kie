@@ -16,10 +16,15 @@ public final class CostModel {
 
     /** 250 CHF de l'heure de metteur en train. */
     public static final long SETTER_CENTS_PER_HOUR = 25_000L;
-    /** Retard : quadratique en heures, pondéré par la priorité. */
-    private static final long TARDINESS_CENTS_PER_HOUR2 = 1_000L;
-    /** Avance : quadratique en heures, divisée par 10, JAMAIS pondérée par la priorité. */
-    private static final long EARLINESS_CENTS_PER_HOUR2 = 100L;
+    /**
+     * Retard : {@code priorité × k × h²} avec <b>k = 5 CHF/h²</b>, la calibration de CPT-KKI-009.
+     * La version précédente utilisait k = 10, ce qui doublait le poids du couple retard/avance
+     * face aux 250 CHF/h du metteur et aux 60-150 CHF/h machine — le rapport interne était bon,
+     * l'équilibre avec les autres termes ne l'était pas.
+     */
+    private static final long TARDINESS_CENTS_PER_HOUR2 = 500L;
+    /** Avance : {@code (k/10) × h²}, JAMAIS pondérée par la priorité. */
+    private static final long EARLINESS_CENTS_PER_HOUR2 = 50L;
     /** Gel souple : écart au dernier plan publié. */
     private static final long SOFT_FREEZE_CENTS_PER_HOUR = 500L;
 
