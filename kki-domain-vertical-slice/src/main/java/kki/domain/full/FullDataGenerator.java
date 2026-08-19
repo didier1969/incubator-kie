@@ -236,6 +236,9 @@ public final class FullDataGenerator {
             settersByTechnology.add(competent);
         }
         int[] nextSetterOfTechnology = new int[technologies];
+        // Un compteur de rotation par bande (technologie, niveau) : réparti sur les vingt postes
+        // du niveau au lieu d'en désigner un au hasard, ce qui laissait des postes vides.
+        int[] nextWorkcenterOfBand = new int[technologies * levels];
 
         // Le pool d'outillage : `toolingCopiesPerType` exemplaires interchangeables par type.
         // MÉMOÏSATION — la plage de valeurs de la réaffectation ne dépend que du type, donc une
@@ -283,7 +286,7 @@ public final class FullDataGenerator {
         // article AGGRAVAIT le plan au lieu de l'améliorer.
         List<Routing> routings = new ArrayList<>(articleCount);
         for (int article = 0; article < articleCount; article++) {
-            routings.add(Routing.draw(random, machines, levels, machinesPerLevel, technologies));
+            routings.add(Routing.draw(random, technologies));
         }
 
         List<Order> orders = new ArrayList<>(orderCount);
@@ -301,11 +304,25 @@ public final class FullDataGenerator {
 
             int passCount = routing.passCount();
             List<Operation> chain = new ArrayList<>(passCount);
+            long[] assignedPerPass = new long[passCount];
             for (int pass = 0; pass < passCount; pass++) {
                 long duration = routing.durationSeconds()[pass];
                 int technology = routing.technology()[pass];
                 int requiredLevel = routing.requiredLevel()[pass];
-                long machineId = routing.machineId()[pass];
+                // AFFECTATION à un workcenter compatible. C'est une décision, pas une donnée de
+                // la gamme : on prend le niveau EXIGÉ — le moins cher qui convienne, ce que ferait
+                // un planificateur — et on tourne sur les postes de ce niveau plutôt que d'en
+                // charger un seul. Monter sur l'échelle reste au système à décider.
+                long machineId;
+                if (routing.revisitOf()[pass] >= 0) {
+                    machineId = assignedPerPass[routing.revisitOf()[pass]];
+                } else {
+                    int band = technology * levels * machinesPerLevel
+                            + requiredLevel * machinesPerLevel;
+                    machineId = band + nextWorkcenterOfBand[band / machinesPerLevel]++
+                            % machinesPerLevel;
+                }
+                assignedPerPass[pass] = machineId;
                 int setupKey = setupMatrix.keyOf(articleId, pass);
                 // Le type d'outillage dérive de la CLÉ de mise en train, pas de la machine : le
                 // montage appartient à ce qu'on fabrique, pas à ce sur quoi on le fabrique. Le
@@ -368,42 +385,44 @@ public final class FullDataGenerator {
      * La gamme d'un article : la même pour tous les ordres qui le demandent.
      *
      * <p>
-     * La machine y figure comme référence de départ, pas comme verrou — c'est une décision que le
-     * système peut reprendre par substitution ascendante. Ce qui est FIXE, c'est la technologie,
-     * le niveau exigé et la durée : ils décrivent ce qu'il faut faire à la pièce.
+     * Précision opérateur : « la gamme d'un article désigne une <b>technologie minimale</b>,
+     * laquelle contient des workcenters ; les opérations sont affectées à des workcenters
+     * compatibles ». La gamme ne nomme donc AUCUN workcenter — elle dit ce qu'il faut savoir
+     * faire, pas où le faire. Le choix du poste est une décision du système, révisable par
+     * substitution ascendante ; la figer dans la gamme revenait à décider à sa place, et laissait
+     * mécaniquement inutilisés tous les postes que la gamme n'avait pas tirés.
+     *
+     * <p>
+     * {@code revisitOf} porte l'axe Z de `CPT-KKI-005` : une passe peut exiger de revenir sur le
+     * MÊME poste qu'une passe antérieure. C'est bien une propriété de la gamme — l'usinage
+     * repasse sur le poste — et non une conséquence de l'affectation.
      */
     private record Routing(int passCount, int[] technology, int[] requiredLevel,
-            long[] durationSeconds, long[] machineId) {
+            long[] durationSeconds, int[] revisitOf) {
 
-        static Routing draw(Random random, List<Machine> machines, int levels,
-                int machinesPerLevel, int technologies) {
+        static Routing draw(Random random, int technologies) {
             int passCount = 1 + random.nextInt(maxPasses);
             int[] technology = new int[passCount];
             int[] requiredLevel = new int[passCount];
             long[] durationSeconds = new long[passCount];
-            long[] machineId = new long[passCount];
-            List<Long> visited = new ArrayList<>();
+            int[] revisitOf = new int[passCount];
             for (int pass = 0; pass < passCount; pass++) {
                 durationSeconds[pass] = minDurationSeconds
                         + (long) (random.nextDouble() * durationSpreadSeconds);
-                int tech = random.nextInt(technologies);
-                int level = skewedLevel(random);
-                // Axe Z : une passe sur deux revient sur une machine déjà visitée par la gamme.
-                if (!visited.isEmpty() && random.nextBoolean()) {
-                    machineId[pass] = visited.get(random.nextInt(visited.size()));
-                    Machine reused = machines.get((int) machineId[pass]);
-                    tech = reused.getTechnology();
-                    level = reused.getLevel();
+                if (pass > 0 && random.nextBoolean()) {
+                    // Axe Z : cette passe revient sur le poste d'une passe antérieure, dont elle
+                    // hérite donc l'exigence exacte.
+                    int earlier = random.nextInt(pass);
+                    revisitOf[pass] = earlier;
+                    technology[pass] = technology[earlier];
+                    requiredLevel[pass] = requiredLevel[earlier];
                 } else {
-                    machineId[pass] = (long) tech * levels * machinesPerLevel
-                            + (long) level * machinesPerLevel
-                            + random.nextInt(machinesPerLevel);
-                    visited.add(machineId[pass]);
+                    revisitOf[pass] = -1;
+                    technology[pass] = random.nextInt(technologies);
+                    requiredLevel[pass] = skewedLevel(random);
                 }
-                technology[pass] = tech;
-                requiredLevel[pass] = level;
             }
-            return new Routing(passCount, technology, requiredLevel, durationSeconds, machineId);
+            return new Routing(passCount, technology, requiredLevel, durationSeconds, revisitOf);
         }
     }
 
