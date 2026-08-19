@@ -105,6 +105,76 @@ public final class SyntheticDataGenerator {
         return new VerticalSliceSolution(orderList, operationList, machineList, List.of(schedule));
     }
 
+    /**
+     * CPT-KKI-008 — compatibilité ASCENDANTE, la vraie topologie. 1000 machines =
+     * {@code technologyCount} technologies × {@code levelsPerTechnology} sous-types ×
+     * {@code machinesPerLevel} machines. Une opération entrant au niveau <i>k</i> est
+     * compatible avec les niveaux <i>k</i> à N de SA technologie, jamais en dessous, et le
+     * coût horaire croît de 60 à 150 CHF/h le long de l'échelle.
+     *
+     * <p>
+     * Différence essentielle avec un découpage en classes disjointes : les niveaux hauts sont
+     * la SOUPAPE de tous les niveaux inférieurs. La charge ne se répartit donc pas par
+     * tirage, elle se déverse vers le haut quand le bas sature — et c'est exactement ce que
+     * le mouvement de substitution machine exploite.
+     *
+     * <p>
+     * {@code levelSkew} : exposant d'une loi de Zipf sur le niveau REQUIS. 0 = tous les
+     * niveaux également demandés ; 1 = les articles simples dominent, donc le bas de
+     * l'échelle est structurellement sous tension et le haut sous-utilisé. C'est le seul
+     * paramètre qui décide de la concentration de la criticité (H2).
+     *
+     * <p>
+     * Affectation ici : au niveau REQUIS, c'est-à-dire au moins cher — le choix qu'une
+     * affectation minimisant le coût ferait en l'absence de contention. Le débordement vers
+     * le haut est une DÉCISION de planification (mouvement M2), pas une donnée : le
+     * générateur ne doit pas la préempter, sinon il masquerait précisément le goulot qu'on
+     * cherche à mesurer.
+     */
+    public static VerticalSliceSolution generateAscendingCompatibility(int orderCount, long seed,
+            double durationScale, int technologyCount, int levelsPerTechnology, int machinesPerLevel,
+            double levelSkew) {
+        Random random = new Random(seed);
+        int machineCount = technologyCount * levelsPerTechnology * machinesPerLevel;
+
+        List<Machine> machineList = new ArrayList<>(machineCount);
+        for (long m = 0; m < machineCount; m++) {
+            machineList.add(new Machine(m, 1000));
+        }
+        double[] cumulativeLevelWeight = buildZipfCumulative(levelsPerTechnology, levelSkew);
+
+        List<Order> orderList = new ArrayList<>(orderCount);
+        List<Operation> operationList = new ArrayList<>();
+        long operationId = 0;
+        for (long o = 0; o < orderCount; o++) {
+            long articleId = random.nextInt(200);
+            int priorityWeight = 1 + random.nextInt(5);
+            long requiredDueEpochSec = BASE_EPOCH + (long) (random.nextDouble() * HORIZON_SECONDS);
+            Order order = new Order(o, articleId, priorityWeight, requiredDueEpochSec);
+
+            int opCount = 3 + random.nextInt(4);
+            List<Operation> orderOps = new ArrayList<>(opCount);
+            for (int i = 0; i < opCount; i++) {
+                long durationSeconds = Math.max(1L,
+                        Math.round((1800 + random.nextInt(5400)) * durationScale));
+                int technology = random.nextInt(technologyCount);
+                int requiredLevel = sampleClass(cumulativeLevelWeight, random.nextDouble());
+                long machineId = (long) technology * levelsPerTechnology * machinesPerLevel
+                        + (long) requiredLevel * machinesPerLevel
+                        + random.nextInt(machinesPerLevel);
+                Operation op = new Operation(operationId++, order, i, durationSeconds, machineId);
+                orderOps.add(op);
+                operationList.add(op);
+            }
+            order.setOperations(orderOps);
+            orderList.add(order);
+        }
+
+        Schedule schedule = new Schedule();
+        schedule.setOrderSequence(new ArrayList<>());
+        return new VerticalSliceSolution(orderList, operationList, machineList, List.of(schedule));
+    }
+
     /** Poids cumulés d'une loi de Zipf d'exposant {@code skew} sur {@code classCount} classes. */
     private static double[] buildZipfCumulative(int classCount, double skew) {
         double[] cumulative = new double[classCount];

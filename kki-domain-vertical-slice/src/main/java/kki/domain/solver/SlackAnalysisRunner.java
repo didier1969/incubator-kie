@@ -51,11 +51,26 @@ public final class SlackAnalysisRunner {
     private SlackAnalysisRunner() {
     }
 
+    /**
+     * CPT-KKI-008 — asymétrie de la demande le long de l'échelle de niveaux. 0 = tous les
+     * sous-types également demandés ; 1 et 2 = les articles simples dominent, hypothèse la
+     * plus vraisemblable en atelier réel.
+     */
+    private static final double[] LEVEL_SKEWS = { 0.0, 1.0, 2.0 };
+
     public static void main(String[] args) {
         if (args.length >= 5) {
             analyse(Integer.parseInt(args[0]), Integer.parseInt(args[1]),
                     Double.parseDouble(args[2]), Integer.parseInt(args[3]), Double.parseDouble(args[4]));
             return;
+        }
+        // CPT-KKI-008 : la topologie réelle est une ÉCHELLE ascendante, pas des classes
+        // disjointes. C'est ce balayage-ci qui fait foi pour H2 ; celui par classes le
+        // précède et ne mesurait pas la bonne structure.
+        for (double durationScale : new double[] { 10.0 }) {
+            for (double levelSkew : LEVEL_SKEWS) {
+                analyseAscending(DEFAULT_ORDER_COUNT, durationScale, levelSkew);
+            }
         }
         for (double durationScale : DURATION_SCALES) {
             for (int classSize : CLASS_SIZES) {
@@ -68,6 +83,19 @@ public final class SlackAnalysisRunner {
                 }
             }
         }
+    }
+
+    /** Topologie CPT-KKI-008 : 5 technologies × 10 sous-types × 20 machines = 1000. */
+    private static void analyseAscending(int orderCount, double durationScale, double levelSkew) {
+        VerticalSliceSolution generated = SyntheticDataGenerator.generateAscendingCompatibility(
+                orderCount, 42L, durationScale, 5, 10, 20, levelSkew);
+        Schedule schedule = new Schedule();
+        schedule.setOrderSequence(new ArrayList<>(generated.getOrderList()));
+        VerticalSliceSolution solution = new VerticalSliceSolution(generated.getOrderList(),
+                generated.getOperationList(), generated.getMachineList(), List.of(schedule));
+        String label = String.format("ASC_N%d_dur%.0fx_lvlskew%.0f", orderCount, durationScale, levelSkew);
+        System.out.print(new SlackReporter(solution).report(label));
+        System.out.println();
     }
 
     private static void analyse(int orderCount, int machineCount, double durationScale, int classSize,
