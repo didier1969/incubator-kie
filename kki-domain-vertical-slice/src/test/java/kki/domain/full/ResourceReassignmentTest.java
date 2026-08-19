@@ -34,6 +34,14 @@ import org.optaplanner.core.config.solver.termination.TerminationConfig;
  */
 class ResourceReassignmentTest {
 
+    @org.junit.jupiter.api.BeforeEach
+    void resetDomainParameters() {
+        // Les dimensions du domaine sont des statiques mutables partagés par toute la JVM de
+        // test. Repartir du référentiel avant CHAQUE test évite qu'un montage paramétré ayant
+        // levé avant sa restauration ne fasse mesurer un autre modèle à ceux qui le suivent.
+        FullDataGenerator.reset();
+    }
+
     @Test
     void theCustomPhaseActuallyReassignsAndLeavesTheScoreConsistent() throws Exception {
         JobShopSolution problem = FullDataGenerator.generate(300, 103L);

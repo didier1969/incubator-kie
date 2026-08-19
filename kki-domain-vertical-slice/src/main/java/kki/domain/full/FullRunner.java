@@ -110,15 +110,33 @@ public final class FullRunner {
         long dirty = FullScoreCalculator.DIRTY_OPERATIONS.get();
         long orderChanges = FullScoreCalculator.ORDER_COMPLETION_CHANGES.get();
 
+        // ⚠️ `reduction_pct` ne regarde que le SOUPLE, et le score est hard/soft avec le dur
+        // prioritaire. Un solveur qui échange du dur contre du souple — remettre en place des
+        // ordres à verrou dur au prix d'un peu de retard — fait exactement son travail et
+        // affiche pourtant une « dégradation ». Le verdict lisible est donc la comparaison des
+        // DEUX composantes, pas d'une seule.
+        long endHard = -solved.getScore().getHardScore();
+        String verdict;
+        if (endHard <= startHard && endCost <= startCost) {
+            verdict = "IMPROVED_BOTH";
+        } else if (endHard < startHard) {
+            verdict = "TRADED_SOFT_FOR_HARD";
+        } else if (endCost < startCost) {
+            verdict = "TRADED_HARD_FOR_SOFT";
+        } else {
+            verdict = "WORSE_BOTH";
+        }
         System.out.printf(
                 "full_result variant=%s orders=%d seconds=%.2f dps=%.1f moves=%d "
-                        + "start_cost_chf=%.0f end_cost_chf=%.0f reduction_pct=%.2f "
-                        + "hard_start=%d hard_end=%d "
+                        + "start_cost_chf=%.0f end_cost_chf=%.0f soft_reduction_pct=%.2f "
+                        + "hard_start=%d hard_end=%d hard_reduction_pct=%.2f verdict=%s "
                         + "dirty_per_move=%.1f order_changes_per_move=%.1f cost_relevant_pct=%.2f%n",
                 variant, orderCount, elapsed, calls / elapsed, propagations,
                 startCost / 100.0, endCost / 100.0,
                 startCost == 0L ? 0.0 : 100.0 * (startCost - endCost) / (double) startCost,
-                startHard, -solved.getScore().getHardScore(),
+                startHard, endHard,
+                startHard == 0L ? 0.0 : 100.0 * (startHard - endHard) / (double) startHard,
+                verdict,
                 (double) dirty / propagations, (double) orderChanges / propagations,
                 dirty == 0L ? 0.0 : 100.0 * orderChanges / dirty);
         if (variant == Variant.M4) {

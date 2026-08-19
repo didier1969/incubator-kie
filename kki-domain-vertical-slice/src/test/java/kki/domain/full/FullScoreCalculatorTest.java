@@ -25,6 +25,14 @@ import org.optaplanner.core.api.score.buildin.hardsoftlong.HardSoftLongScore;
  */
 class FullScoreCalculatorTest {
 
+    @org.junit.jupiter.api.BeforeEach
+    void resetDomainParameters() {
+        // Les dimensions du domaine sont des statiques mutables partagés par toute la JVM de
+        // test. Repartir du référentiel avant CHAQUE test évite qu'un montage paramétré ayant
+        // levé avant sa restauration ne fasse mesurer un autre modèle à ceux qui le suivent.
+        FullDataGenerator.reset();
+    }
+
     @Test
     void incrementalScoreMatchesFullSweepAfterRandomSwaps() {
         JobShopSolution solution = FullDataGenerator.generate(120, 7L);

@@ -19,6 +19,14 @@ import org.junit.jupiter.api.Test;
  */
 class BackwardPassTest {
 
+    @org.junit.jupiter.api.BeforeEach
+    void resetDomainParameters() {
+        // Les dimensions du domaine sont des statiques mutables partagés par toute la JVM de
+        // test. Repartir du référentiel avant CHAQUE test évite qu'un montage paramétré ayant
+        // levé avant sa restauration ne fasse mesurer un autre modèle à ceux qui le suivent.
+        FullDataGenerator.reset();
+    }
+
     @Test
     void earliestIsNeverAfterLatest() {
         // Invariant universel, y compris sur l'instance saturée : une borne au plus tard placée
@@ -175,8 +183,7 @@ class BackwardPassTest {
             FullScoreCalculator.ColdSweep cold, FullScoreCalculator.BackwardSweep backward) {
 
         static Fixture lightlyLoaded(int orders, long seed) {
-            int savedSetters = FullDataGenerator.setterCount;
-            int savedBreadth = FullDataGenerator.setterSkillBreadth;
+            FullDataGenerator.reset();
             try {
                 FullDataGenerator.setterCount = 250;
                 FullDataGenerator.setterSkillBreadth = 5;
@@ -186,8 +193,7 @@ class BackwardPassTest {
                 return new Fixture(solution, calculator, calculator.coldSweep(),
                         calculator.backwardSweep());
             } finally {
-                FullDataGenerator.setterCount = savedSetters;
-                FullDataGenerator.setterSkillBreadth = savedBreadth;
+                FullDataGenerator.reset();
             }
         }
     }

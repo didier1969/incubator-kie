@@ -28,6 +28,14 @@ import org.junit.jupiter.api.Test;
  */
 class ToolingPoolTest {
 
+    @org.junit.jupiter.api.BeforeEach
+    void resetDomainParameters() {
+        // Les dimensions du domaine sont des statiques mutables partagés par toute la JVM de
+        // test. Repartir du référentiel avant CHAQUE test évite qu'un montage paramétré ayant
+        // levé avant sa restauration ne fasse mesurer un autre modèle à ceux qui le suivent.
+        FullDataGenerator.reset();
+    }
+
     private static final long HOUR = 3600L;
     private static final long DAY = 86_400L;
 
