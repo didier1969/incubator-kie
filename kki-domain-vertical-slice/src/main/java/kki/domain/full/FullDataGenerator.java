@@ -44,6 +44,27 @@ public final class FullDataGenerator {
 
     /** Horizon de planification. */
     public static long horizonSeconds = 6L * 30 * 24 * 3600;
+    /**
+     * Jours à résolution journalière dans les calendriers. Au-delà, motif hebdomadaire — c'est la
+     * simplification que l'opérateur autorise : « au-delà de six mois, c'est beaucoup moins
+     * important ». Les données de terrain iront jusqu'à deux ans quand elles existeront ; la
+     * structure les accepte sans changement, seule cette valeur monte.
+     */
+    public static int fineDayCount = 182;
+    /**
+     * Nombre de SECTEURS de machines. L'horaire est une propriété du secteur, pas de la machine
+     * — « c'est en général par secteur ». C'est aussi ce qui rend le partage possible : douze
+     * motifs pour mille machines, référencés et jamais recopiés.
+     */
+    public static int machineSectorCount = 12;
+    /**
+     * Nombre de PROFILS d'horaire du personnel. Un profil est un couple (heure de prise de poste,
+     * durée) : certains commencent plus tôt, d'autres plus tard ; certains font quatre heures,
+     * la plupart huit — huit étant le maximum courant.
+     */
+    public static int setterProfileCount = 8;
+    /** Jours fériés par an, fermés pour le personnel et pour les secteurs non continus. */
+    public static int holidaysPerYear = 10;
     /** Nombre d'articles distincts. Redimensionne l'instance sans changer le régime. */
     public static int articleCount = 200;
     /** Longueur maximale d'une chaîne d'opérations (PIL-KKI-004 : 1 à 6 passes). */
@@ -100,13 +121,7 @@ public final class FullDataGenerator {
      * travaillé. Les laisser cachées revenait à figer un multiplicateur de 7 sur toute la durée
      * physique de l'atelier sans jamais l'écrire.
      */
-    public static int setterWorkingDays = 3;
-    /**
-     * Motif de jours QUELCONQUE, prioritaire sur {@link #setterWorkingDays} quand il est non nul.
-     * Seul moyen d'exprimer un metteur qui travaille le vendredi et le lundi — un motif non
-     * contigu, et le pire cas du modèle.
-     */
-    public static int setterWorkingDayMask = 0;
+    public static int setterWorkingDays = 5;
     public static long setterWindowSeconds = 8L * 3600L;
     /** Heure d'ouverture de la plage metteur. */
     public static long setterWindowStartSeconds = 8L * 3600L;
@@ -147,6 +162,10 @@ public final class FullDataGenerator {
      */
     public static void reset() {
         horizonSeconds = 6L * 30 * 24 * 3600;
+        fineDayCount = 182;
+        machineSectorCount = 12;
+        setterProfileCount = 8;
+        holidaysPerYear = 10;
         articleCount = 200;
         maxPasses = 6;
         technologies = 5;
@@ -157,8 +176,7 @@ public final class FullDataGenerator {
         levelDemandSkew = 2.0;
         setterCount = 900;
         setterSkillBreadth = 2;
-        setterWorkingDays = 3;
-        setterWorkingDayMask = 0;
+        setterWorkingDays = 5;
         setterWindowSeconds = 8L * 3600L;
         setterWindowStartSeconds = 8L * 3600L;
         setterAbsenceShare = 0.15;
@@ -177,6 +195,8 @@ public final class FullDataGenerator {
     public static JobShopSolution generate(int orderCount, long seed) {
         Random random = new Random(seed);
         SetupMatrix setupMatrix = new SetupMatrix(articleCount, maxPasses, seed);
+        ShiftCatalog catalog = ShiftCatalog.build(random);
+        int totalMachines = technologies * levels * machinesPerLevel;
 
         List<Machine> machines = new ArrayList<>(technologies * levels * machinesPerLevel);
         for (int technology = 0; technology < technologies; technology++) {
@@ -184,8 +204,10 @@ public final class FullDataGenerator {
                 for (int k = 0; k < machinesPerLevel; k++) {
                     long id = machines.size();
                     // 60 CHF/h en bas d'échelle, +10 par palier, 150 en haut.
+                    // Le secteur regroupe des machines contiguës : elles partagent l'horaire.
+                    int sector = (int) (id * Math.max(1, machineSectorCount) / totalMachines);
                     machines.add(new Machine(id, technology, level, 6_000L + 1_000L * level,
-                            machineCalendarOf(random)));
+                            machineCalendarOf(catalog, sector, random)));
                 }
             }
         }
@@ -200,7 +222,8 @@ public final class FullDataGenerator {
             for (int b = 0; b < Math.min(setterSkillBreadth, technologies); b++) {
                 mastered[(i + b) % technologies] = true;
             }
-            setters.add(new Setter(i, setterCalendarOf(random), mastered));
+            setters.add(new Setter(i, setterCalendarOf(catalog, i % Math.max(1, setterProfileCount),
+                    random), mastered));
         }
         List<List<Setter>> settersByTechnology = new ArrayList<>(technologies);
         for (int technology = 0; technology < technologies; technology++) {
@@ -339,15 +362,72 @@ public final class FullDataGenerator {
     }
 
     /**
-     * Calendrier d'une machine : continue, ou en deux équipes du lundi au vendredi. Dans les deux
-     * cas des fenêtres de MAINTENANCE viennent s'y inscrire — ce sont des indisponibilités datées,
-     * pas un mécanisme à part (CPT-KKI-004, 4e cas).
+     * Les motifs d'horaire, construits UNE FOIS et partagés.
+     *
+     * <p>
+     * C'est ici que se joue « éviter les explosions de ressources » : douze motifs de secteur et
+     * huit profils de personnel couvrent mille neuf cents ressources. Chaque motif porte cent
+     * quatre-vingt-deux enregistrements journaliers ; les dupliquer par ressource coûterait des
+     * dizaines de mégaoctets pour une information identique.
      */
-    private static WorkCalendar machineCalendarOf(Random random) {
-        WorkCalendar base = random.nextDouble() < nonContinuousMachineShare
-                ? WorkCalendar.ofFirstDays(5, 6L * 3600L, 16L * 3600L, new long[0])
-                : WorkCalendar.CONTINUOUS;
-        return base.withBlackouts(maintenanceWindows(random));
+    private record ShiftCatalog(ShiftPattern[] machineSectors, ShiftPattern[] setterProfiles) {
+
+        static ShiftCatalog build(Random random) {
+            int[] holidays = holidayDays(random);
+
+            ShiftPattern[] sectors = new ShiftPattern[Math.max(1, machineSectorCount)];
+            for (int sector = 0; sector < sectors.length; sector++) {
+                if (random.nextDouble() >= nonContinuousMachineShare) {
+                    // Décolletage et assimilés : la machine tourne, jours fériés compris.
+                    sectors[sector] = ShiftPattern.continuous(fineDayCount);
+                } else if (random.nextBoolean()) {
+                    // Deux équipes, du lundi au vendredi.
+                    sectors[sector] = ShiftPattern.regular(fineDayCount, 0b001_1111,
+                            6L * 3600L, 16L * 3600L, holidays);
+                } else {
+                    // Une équipe.
+                    sectors[sector] = ShiftPattern.regular(fineDayCount, 0b001_1111,
+                            7L * 3600L, 8L * 3600L, holidays);
+                }
+            }
+
+            // Profils de personnel. Les trois axes que l'opérateur a nommés, dérivés des
+            // paramètres d'horaire pour que le banc puisse encore les balayer :
+            //   - prise de poste ÉCHELONNÉE autour de setterWindowStartSeconds ;
+            //   - durée PLEINE (setterWindowSeconds, le maximum courant) ou DEMIE ;
+            //   - semaine complète ou raccourcie d'un jour.
+            int fullWeek = (1 << Math.max(1, Math.min(7, setterWorkingDays))) - 1;
+            int shortWeek = fullWeek >> 1 != 0 ? fullWeek >> 1 : fullWeek;
+            ShiftPattern[] profiles = new ShiftPattern[Math.max(1, setterProfileCount)];
+            for (int profile = 0; profile < profiles.length; profile++) {
+                long offset = ((profile % 4) - 1) * 3600L; // une heure plus tôt à deux plus tard
+                long start = Math.max(0L, setterWindowStartSeconds + offset);
+                long length = profile % 4 == 3 ? setterWindowSeconds / 2 : setterWindowSeconds;
+                int days = profile % 3 == 2 ? shortWeek : fullWeek;
+                profiles[profile] = ShiftPattern.regular(fineDayCount, days, start, length,
+                        holidays);
+            }
+            return new ShiftCatalog(sectors, profiles);
+        }
+
+        /** Jours fermés pour tout l'atelier — communs, donc dans le MOTIF et non par ressource. */
+        private static int[] holidayDays(Random random) {
+            int count = Math.max(0, holidaysPerYear * fineDayCount / 365);
+            int[] days = new int[count];
+            for (int i = 0; i < count; i++) {
+                days[i] = random.nextInt(Math.max(1, fineDayCount));
+            }
+            return days;
+        }
+    }
+
+    /**
+     * Calendrier d'une machine : le motif PARTAGÉ de son secteur, plus ses propres fenêtres de
+     * MAINTENANCE — des indisponibilités datées, pas un mécanisme à part (CPT-KKI-004, 4e cas).
+     * {@code withBlackouts} traverse le motif par référence : c'est ce qui préserve le partage.
+     */
+    private static WorkCalendar machineCalendarOf(ShiftCatalog catalog, int sector, Random random) {
+        return new WorkCalendar(catalog.machineSectors()[sector], maintenanceWindows(random));
     }
 
     /** Arrêts de maintenance : quelques journées entières sur l'horizon, subies. */
@@ -368,17 +448,14 @@ public final class FullDataGenerator {
      * Calendrier d'un metteur : lundi-mercredi 8 h, plus d'éventuelles absences. La maladie de
      * CPT-KKI-007 ne demande aucun mécanisme dédié — c'est un trou dans SON calendrier.
      */
-    private static WorkCalendar setterCalendarOf(Random random) {
-        WorkCalendar base = setterWorkingDayMask != 0
-                ? new WorkCalendar(setterWorkingDayMask, setterWindowStartSeconds,
-                        setterWindowSeconds, new long[0])
-                : WorkCalendar.ofFirstDays(setterWorkingDays, setterWindowStartSeconds,
-                        setterWindowSeconds, new long[0]);
+    private static WorkCalendar setterCalendarOf(ShiftCatalog catalog, int profile, Random random) {
+        ShiftPattern pattern = catalog.setterProfiles()[profile];
         if (random.nextDouble() < setterAbsenceShare) {
             long start = (long) (random.nextDouble() * horizonSeconds * 0.9);
-            return base.withBlackouts(new long[] { start, start + setterAbsenceSeconds });
+            return new WorkCalendar(pattern,
+                    new long[] { start, start + setterAbsenceSeconds });
         }
-        return base;
+        return new WorkCalendar(pattern, new long[0]);
     }
 
     /**

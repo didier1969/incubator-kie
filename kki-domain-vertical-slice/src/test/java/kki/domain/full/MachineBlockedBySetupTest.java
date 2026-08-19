@@ -89,23 +89,41 @@ class MachineBlockedBySetupTest {
     }
 
     @Test
-    void theDefaultSetterCalendarIsExactlyMondayToWednesday() {
-        // Le garde qui manquait. En généralisant le calendrier j'ai laissé une surcharge
-        // int/long : `new WorkCalendar(3, ...)` — « les trois premiers jours » — a été résolu
-        // vers le constructeur À MASQUE, donc 0b011 = lundi et mardi. Le metteur perdait son
-        // mercredi, et le coût de l'instance de référence doublait sans qu'aucun test ne bouge.
-        WorkCalendar setter = FullDataGenerator.generate(10, 1L).getSetterList().get(0)
-                .getCalendar();
-        for (int day = 0; day <= 2; day++) {
-            assertTrue(setter.isOpenAt(day * DAY + 10 * HOUR),
-                    "le metteur type doit travailler le jour " + day);
+    void everySetterProfileMatchesTheDeclaredScheduleParameters() {
+        // Le garde qui manquait, reformulé sur ce qu'il doit protéger : qu'AUCUN décalage
+        // silencieux ne s'installe entre les paramètres déclarés et le calendrier engendré.
+        // Sa version précédente a été écrite parce qu'une surcharge int/long avait résolu
+        // `new WorkCalendar(3, ...)` — « les trois premiers jours » — vers le constructeur à
+        // MASQUE, soit 0b011 : le metteur perdait un jour et le coût de l'instance de référence
+        // doublait sans qu'aucun test ne bouge.
+        //
+        // La semaine est comptée dans la zone GROSSIÈRE : la zone fine porte des jours fériés
+        // datés, qui feraient varier le compte d'une semaine à l'autre pour de bonnes raisons.
+        JobShopSolution solution = FullDataGenerator.generate(40, 1L);
+        long coarseWeekStart = (long) FullDataGenerator.fineDayCount * DAY;
+        coarseWeekStart += (7 - coarseWeekStart / DAY % 7) % 7 * DAY; // aligné sur un lundi
+
+        for (Setter setter : solution.getSetterList()) {
+            ShiftPattern pattern = setter.getCalendar().getPattern();
+            long weekly = pattern.workedBefore(coarseWeekStart + 7 * DAY)
+                    - pattern.workedBefore(coarseWeekStart);
+            long daily = pattern.workedBefore(coarseWeekStart + DAY)
+                    - pattern.workedBefore(coarseWeekStart);
+
+            assertTrue(daily <= FullDataGenerator.setterWindowSeconds,
+                    setter + " dépasse la durée de poste déclarée : " + daily / 3600 + " h");
+            assertTrue(daily == FullDataGenerator.setterWindowSeconds
+                    || daily == FullDataGenerator.setterWindowSeconds / 2,
+                    setter + " doit faire un poste plein ou une demi-journée, mesuré "
+                            + daily / 3600 + " h");
+            long openDays = weekly / Math.max(1L, daily);
+            assertTrue(openDays <= FullDataGenerator.setterWorkingDays,
+                    setter + " travaille " + openDays + " jours pour "
+                            + FullDataGenerator.setterWorkingDays + " déclarés");
+            assertTrue(openDays >= FullDataGenerator.setterWorkingDays - 1,
+                    setter + " ne travaille que " + openDays + " jours : un profil raccourci"
+                            + " retire UN jour, pas davantage");
         }
-        for (int day = 3; day <= 6; day++) {
-            assertTrue(!setter.isOpenAt(day * DAY + 10 * HOUR),
-                    "le metteur type ne doit PAS travailler le jour " + day);
-        }
-        assertEquals(3 * 8 * HOUR, setter.workedSecondsBefore(7 * DAY),
-                "vingt-quatre heures ouvrées par semaine, pas seize");
     }
 
     @Test
