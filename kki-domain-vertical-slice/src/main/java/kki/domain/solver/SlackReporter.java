@@ -202,13 +202,21 @@ public final class SlackReporter {
         return makespan;
     }
 
-    /** Échéance la plus lointaine, en secondes depuis l'origine. */
+    /**
+     * Horizon de planification, en secondes depuis l'origine.
+     *
+     * <p>
+     * Pris au 95e centile des échéances et non au maximum : un seul ordre à échéance lointaine
+     * gonflerait l'horizon et ferait passer pour « tenant dans la fenêtre » un plan qui la
+     * déborde largement. Le détecteur de régime s'appuie dessus pour décider s'il reste de la
+     * place devant — une décision qu'un point aberrant ne doit pas pouvoir retourner.
+     */
     public long horizonSeconds() {
-        long horizon = 0L;
-        for (Order order : solution.getOrderList()) {
-            horizon = Math.max(horizon, order.getRequiredDueEpochSec() - origin);
-        }
-        return horizon;
+        long[] dueDates = solution.getOrderList().stream()
+                .mapToLong(order -> order.getRequiredDueEpochSec() - origin)
+                .sorted()
+                .toArray();
+        return percentile(dueDates, 95);
     }
 
     public long totalWorkSeconds() {
@@ -369,10 +377,14 @@ public final class SlackReporter {
         long totalCritical = Arrays.stream(criticalByMachine).sum();
         long machinesWithCritical = Arrays.stream(criticalByMachine).filter(c -> c > 0L).count();
         return String.format(
-                "criticality[%s] critical_ops=%d machines_touched=%d/%d "
+                "criticality[%s] critical_ops=%d machines_touched=%d/%d critical_share=%.1f%% "
                         + "top1pct_share=%.1f%% top5pct_share=%.1f%% top10pct_share=%.1f%% "
-                        + "concentration_ratio=%.2f%n",
+                        + "criticality_over_load=%.2f%n",
                 label, totalCritical, machinesWithCritical, solution.getMachineList().size(),
+                // critical_share EST la garde : au-delà de ~0,9 le prédicat sature, la
+                // criticité devient la charge, et le rapport criticality_over_load vaut 1 par
+                // construction. Publié pour que personne ne re-dérive cette tautologie.
+                100.0 * totalCritical / Math.max(1, solution.getOperationList().size()),
                 100.0 * topShareOf(criticalByMachine, 1),
                 100.0 * topShareOf(criticalByMachine, 5),
                 100.0 * topShareOf(criticalByMachine, 10),

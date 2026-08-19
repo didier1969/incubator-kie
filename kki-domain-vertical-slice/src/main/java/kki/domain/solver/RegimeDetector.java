@@ -12,8 +12,10 @@ package kki.domain.solver;
  * elles sont mesurées sur l'instance, en un balayage chacune, avant tout solve.
  *
  * <p>
- * <b>Aucun seuil arbitraire.</b> Les deux décisions reposent sur des règles qui n'introduisent
- * pas de constante à calibrer :
+ * <b>Un seuil assumé, un seuil dérivé.</b> La bascule datation/séquencement repose sur une part
+ * d'avance de 50 %, qui EST un choix : c'est le point où le séquencement adresse moins de la
+ * moitié du coût. Définissable, mais pas déductible — à recalibrer si le banc montre une zone
+ * grise. Le déclencheur de goulot, lui, ne demande aucune calibration :
  *
  * <ul>
  * <li><b>Datation ou séquencement</b> — règle mécaniste. Retarder un ordre ne peut réduire un

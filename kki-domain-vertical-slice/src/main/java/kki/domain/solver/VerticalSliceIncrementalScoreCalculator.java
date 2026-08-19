@@ -176,6 +176,19 @@ public class VerticalSliceIncrementalScoreCalculator
     public static final AtomicLong PROPAGATION_CALLS = new AtomicLong(0L);
 
     /**
+     * REQ-KKI-010 — nombre de fois qu'un ORDRE change de date de fin, donc de coût.
+     *
+     * <p>
+     * C'est la seule grandeur qui décide du sort du levier d'élagage L3. La marge classique
+     * mesure « cette opération peut-elle glisser ? » ; le coût, lui, ne dépend QUE des dates
+     * de fin d'ordre — ~5000 valeurs contre 22500 opérations. Une propagation qui redate 1600
+     * opérations sans déplacer la fin d'un seul ordre n'a rien coûté au score, et aurait pu
+     * être coupée. Le rapport {@code ORDER_COMPLETION_CHANGES / PROPAGATE_DIRTY_POPS} dit
+     * exactement quelle fraction du travail de propagation est pertinente au coût.
+     */
+    public static final AtomicLong ORDER_COMPLETION_CHANGES = new AtomicLong(0L);
+
+    /**
      * REQ-KKI-007 piste (d) : reference LIVE vers xPosition, exposee pour
      * OrderPositionNearbyDistanceMeter (nearby selection cote
      * LocalSearchPhaseConfig, VerticalSliceRunner). xPosition n'est jamais
@@ -527,6 +540,10 @@ public class VerticalSliceIncrementalScoreCalculator
             if (i + 1 < ops.size()) {
                 enqueue(ops.get(i + 1));
             } else {
+                // Dernière opération de l'ordre : sa date de fin bouge, donc le COÛT bouge.
+                // Seul endroit du calculateur où cela se produit — c'est donc la mesure exacte
+                // de « combien d'ordres cette propagation a-t-elle réellement coûté ».
+                ORDER_COMPLETION_CHANGES.incrementAndGet();
                 int oi = (int) order.getId();
                 long newCost = computeOrderCost(order, newEnd);
                 softScoreTotal += orderCost[oi];

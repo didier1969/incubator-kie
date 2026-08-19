@@ -201,6 +201,7 @@ public final class VerticalSliceRunner {
         VerticalSliceIncrementalScoreCalculator.PROPAGATE_DIRTY_POPS.set(0L);
         VerticalSliceIncrementalScoreCalculator.MOVE_SPAN_TOTAL.set(0L);
         VerticalSliceIncrementalScoreCalculator.PROPAGATION_CALLS.set(0L);
+        VerticalSliceIncrementalScoreCalculator.ORDER_COMPLETION_CHANGES.set(0L);
         // Cout du MEILLEUR plan connu a l'instant t : alimente par solveAndListen (appele a
         // chaque amelioration du best), lu par l'echantillonneur. Long.MIN_VALUE = aucun
         // best encore publie.
@@ -237,11 +238,17 @@ public final class VerticalSliceRunner {
         long propagationCalls = VerticalSliceIncrementalScoreCalculator.PROPAGATION_CALLS.get();
         long moveSpanTotal = VerticalSliceIncrementalScoreCalculator.MOVE_SPAN_TOTAL.get();
         double meanSpanPerMove = propagationCalls == 0 ? -1.0 : (double) moveSpanTotal / propagationCalls;
+        // REQ-KKI-010 : la seule mesure qui decide du sort de l'elagage L3. Le cout ne depend
+        // que des dates de fin d'ordre ; tout le reste de la propagation est du travail exact
+        // mais sans effet sur le score.
+        long orderChanges = VerticalSliceIncrementalScoreCalculator.ORDER_COMPLETION_CHANGES.get();
+        double orderChangesPerCall = propagationCalls == 0 ? -1.0 : (double) orderChanges / propagationCalls;
+        double costRelevantPct = dirtyPops == 0 ? -1.0 : 100.0 * orderChanges / dirtyPops;
         System.out.printf(
-                "ls_done[%s] score=%s ls_seconds=%.2f ls_calculateScore_calls=%d ls_ips=%.1f setup_seconds_before_first_call=%.2f propagation_seconds=%.2f propagation_pct=%.1f propagate_pops=%d pops_per_call=%.1f topological_inversions=%d dirty_pops=%d dirty_per_call=%.1f noop_pop_pct=%.1f propagation_calls=%d mean_span_per_move=%.1f%n",
+                "ls_done[%s] score=%s ls_seconds=%.2f ls_calculateScore_calls=%d ls_ips=%.1f setup_seconds_before_first_call=%.2f propagation_seconds=%.2f propagation_pct=%.1f propagate_pops=%d pops_per_call=%.1f topological_inversions=%d dirty_pops=%d dirty_per_call=%.1f noop_pop_pct=%.1f propagation_calls=%d mean_span_per_move=%.1f order_changes_per_call=%.1f cost_relevant_pct=%.2f%n",
                 effectiveLabel, lsSolved.getScore(), lsSecondsElapsed, lsCalls, lsIps, setupSeconds, propagationSeconds,
                 100.0 * propagationSeconds / lsSecondsElapsed, propagatePops, popsPerCall, inversions,
-                dirtyPops, dirtyPerCall, noopPopPct, propagationCalls, meanSpanPerMove);
+                dirtyPops, dirtyPerCall, noopPopPct, propagationCalls, meanSpanPerMove, orderChangesPerCall, costRelevantPct);
     }
 
     /**
