@@ -22,7 +22,11 @@ import org.optaplanner.core.config.solver.termination.TerminationConfig;
  * changerait la nature du mouvement mesuré.
  *
  * <pre>
- *   java ... kki.domain.full.FullRunner [ordres] [secondes]   défaut : 5000 60
+ *   java ... kki.domain.full.FullRunner [ordres] [secondes] [variante] [skew] [jours] [part]
+ *   défaut : 5000 60 M5
+ *
+ *   # le classpath se régénère par :
+ *   mvn -o dependency:build-classpath -Dmdep.outputFile=target/cp.txt
  * </pre>
  */
 public final class FullRunner {
@@ -59,7 +63,10 @@ public final class FullRunner {
     public static void main(String[] args) throws Exception {
         int orderCount = args.length > 0 ? Integer.parseInt(args[0]) : 5000;
         long seconds = args.length > 1 ? Long.parseLong(args[1]) : 60L;
-        Variant variant = args.length > 2 ? Variant.valueOf(args[2]) : Variant.M3;
+        // Le defaut est la MEILLEURE configuration connue, pas la plus ancienne. M3 l'etait
+        // tant qu'un seul mouvement existait ; laisser M3 par defaut ferait lire -51 % comme
+        // l'etat de l'art la ou M5 rend -94,75 % a budget egal (REQ-KKI-031).
+        Variant variant = args.length > 2 ? Variant.valueOf(args[2]) : Variant.M5;
         if (args.length > 3) {
             FullDataGenerator.levelDemandSkew = Double.parseDouble(args[3]);
         }
