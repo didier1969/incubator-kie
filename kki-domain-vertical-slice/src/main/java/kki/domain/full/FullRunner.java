@@ -35,7 +35,13 @@ public final class FullRunner {
         /** M1 seul — échange de deux positions X tirées au hasard. Référence REQ-KKI-012. */
         M1,
         /** M3 — mêmes échanges, mais guidés vers les arcs disjonctifs tendus. */
-        M3
+        M3,
+        /**
+         * M4 — M3, coupé en deux par une phase de réaffectation de ressource. C'est le CÂBLAGE
+         * des mouvements (4) à (7) de CPT-KKI-010, que DEC-KKI-004 interdit d'exprimer comme des
+         * variables de planification.
+         */
+        M4
     }
 
     public static void main(String[] args) throws Exception {
@@ -75,17 +81,11 @@ public final class FullRunner {
         ScoreDirectorFactoryConfig scoreDirectorFactoryConfig = new ScoreDirectorFactoryConfig();
         scoreDirectorFactoryConfig.setIncrementalScoreCalculatorClass(FullScoreCalculator.class);
 
-        TerminationConfig termination = new TerminationConfig();
-        termination.setSecondsSpentLimit(seconds);
-        LocalSearchPhaseConfig localSearch = new LocalSearchPhaseConfig();
-        localSearch.setTerminationConfig(termination);
-        localSearch.setMoveSelectorConfig(moveSelectorOf(variant));
-
         SolverConfig solverConfig = new SolverConfig();
         solverConfig.setSolutionClass(JobShopSolution.class);
         solverConfig.setEntityClassList(List.of(Schedule.class));
         solverConfig.setScoreDirectorFactoryConfig(scoreDirectorFactoryConfig);
-        solverConfig.setPhaseConfigList(List.of(localSearch));
+        solverConfig.setPhaseConfigList(phasesOf(variant, seconds));
 
         FullScoreCalculator.CALCULATE_SCORE_CALLS.set(0L);
         FullScoreCalculator.DIRTY_OPERATIONS.set(0L);
@@ -121,18 +121,46 @@ public final class FullRunner {
                 startHard, -solved.getScore().getHardScore(),
                 (double) dirty / propagations, (double) orderChanges / propagations,
                 dirty == 0L ? 0.0 : 100.0 * orderChanges / dirty);
+        if (variant == Variant.M4) {
+            System.out.printf("reassignment attempts=%d accepted=%d%n",
+                    ResourceReassignmentPhaseCommand.attempts,
+                    ResourceReassignmentPhaseCommand.ACCEPTED_LAST_RUN);
+        }
     }
 
     /**
-     * M1 = échange X uniforme · M2 = changement de machine compatible · M3 = échange X guidé vers
-     * les arcs tendus. M3 remplace M1 plutôt que de s'y ajouter : les deux produisent le même type
-     * de mouvement, l'un au hasard et l'autre en sachant pourquoi.
+     * M1 = échange X uniforme · M3 = échange X guidé vers les arcs tendus · M4 = M3 coupé par une
+     * phase de réaffectation de ressource. M3 remplace M1 plutôt que de s'y ajouter : les deux
+     * produisent le même type de mouvement, l'un au hasard et l'autre en sachant pourquoi.
+     *
+     * <p>
+     * Le budget de temps est réparti à parts égales entre les phases de recherche de M4, pour que
+     * la comparaison à M3 se fasse à budget total ÉGAL — sans quoi la phase de réaffectation
+     * serait payée par du temps que M3 n'a pas eu.
      */
-    private static MoveSelectorConfig<?> moveSelectorOf(Variant variant) {
-        return switch (variant) {
+    private static List<org.optaplanner.core.config.phase.PhaseConfig> phasesOf(Variant variant,
+            long seconds) {
+        if (variant != Variant.M4) {
+            return List.of(localSearchOf(variant, seconds));
+        }
+        org.optaplanner.core.config.phase.custom.CustomPhaseConfig reassignment =
+                new org.optaplanner.core.config.phase.custom.CustomPhaseConfig();
+        reassignment.setCustomPhaseCommandClassList(
+                List.of(ResourceReassignmentPhaseCommand.class));
+        return List.of(localSearchOf(Variant.M3, seconds / 2), reassignment,
+                localSearchOf(Variant.M3, seconds - seconds / 2));
+    }
+
+    private static LocalSearchPhaseConfig localSearchOf(Variant variant, long seconds) {
+        TerminationConfig termination = new TerminationConfig();
+        termination.setSecondsSpentLimit(seconds);
+        LocalSearchPhaseConfig localSearch = new LocalSearchPhaseConfig();
+        localSearch.setTerminationConfig(termination);
+        localSearch.setMoveSelectorConfig(switch (variant) {
             case M1 -> swapSelector(false);
-            case M3 -> swapSelector(true);
-        };
+            default -> swapSelector(true);
+        });
+        return localSearch;
     }
 
     /**

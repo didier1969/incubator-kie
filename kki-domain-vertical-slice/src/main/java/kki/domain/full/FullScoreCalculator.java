@@ -768,6 +768,15 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         return null;
     }
 
+    /**
+     * La solution sur laquelle CE calculateur travaille. Sert à la commande de phase pour
+     * vérifier qu'elle tient bien le calculateur du directeur de score courant : `LIVE` est une
+     * référence statique, et un solveur peut instancier plusieurs directeurs.
+     */
+    public JobShopSolution getWorkingSolution() {
+        return solution;
+    }
+
     public int positionOf(Order order) {
         return xPosition[(int) order.getId()];
     }
