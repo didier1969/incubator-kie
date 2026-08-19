@@ -219,11 +219,18 @@ public final class ParameterSweepRunner {
             System.out.printf("WARNING point encore saturé (late_share=%.2f) : la comparaison"
                     + " M3/M4 n'y sera pas plus interprétable qu'avant%n", regime.lateShare);
         }
-        for (FullRunner.Variant variant : new FullRunner.Variant[] {
-                FullRunner.Variant.M3, FullRunner.Variant.M4 }) {
-            FullRunner.main(new String[] { Integer.toString(orderCount), Long.toString(seconds),
-                    variant.name() });
+        // Plusieurs graines : un écart de moins d'un pour cent entre deux variantes sur UN
+        // tirage n'est pas un verdict. Si le signe change d'une graine à l'autre, c'est du bruit.
+        for (long instanceSeed : new long[] { 42L, 43L, 44L }) {
+            FullRunner.seed = instanceSeed;
+            for (FullRunner.Variant variant : new FullRunner.Variant[] {
+                    FullRunner.Variant.M3, FullRunner.Variant.M4 }) {
+                System.out.printf("seed=%d variant=%s%n", instanceSeed, variant);
+                FullRunner.main(new String[] { Integer.toString(orderCount), Long.toString(seconds),
+                        variant.name() });
+            }
         }
+        FullRunner.seed = 42L;
     }
 
     // ************************************************************************

@@ -30,6 +30,12 @@ public final class FullRunner {
     private FullRunner() {
     }
 
+    /**
+     * Graine de l'instance. Un verdict qui ne tient que sur une graine n'est pas un verdict :
+     * c'est une observation sur un tirage.
+     */
+    public static long seed = 42L;
+
     /** Jeu de mouvements activé, pour décomposer le gain par incrément (A4). */
     public enum Variant {
         /** M1 seul — échange de deux positions X tirées au hasard. Référence REQ-KKI-012. */
@@ -52,7 +58,7 @@ public final class FullRunner {
             FullDataGenerator.levelDemandSkew = Double.parseDouble(args[3]);
         }
 
-        JobShopSolution problem = FullDataGenerator.generate(orderCount, 42L);
+        JobShopSolution problem = FullDataGenerator.generate(orderCount, seed);
         System.out.printf("full_instance orders=%d operations=%d machines=%d setters=%d"
                 + " toolings=%d level_skew=%.1f%n",
                 problem.getOrderList().size(), problem.getOperationList().size(),
