@@ -23,6 +23,10 @@ import org.junit.jupiter.api.Test;
  * <p>
  * M3 est un sélecteur restrictif : son risque n'est pas de se tromper mais de ne rien émettre.
  * Un itérateur tari se lirait comme une convergence, c'est-à-dire comme un succès.
+ *
+ * <p>
+ * Le différentiel mixte couvre désormais les QUATRE familles de prédécesseurs — chaîne, machine,
+ * metteur, outillage. Une famille absente du tirage est une famille sans filet.
  */
 class MoveSetTest {
 
@@ -36,8 +40,9 @@ class MoveSetTest {
         List<Operation> operations = solution.getOperationList();
         Random random = new Random(29L);
 
-        for (int move = 0; move < 120; move++) {
-            if (random.nextBoolean()) {
+        for (int move = 0; move < 160; move++) {
+            int kind = random.nextInt(4);
+            if (kind == 0) {
                 int a = random.nextInt(sequence.size());
                 int b = random.nextInt(sequence.size());
                 if (a == b) {
@@ -48,10 +53,20 @@ class MoveSetTest {
                 calculator.beforeListVariableChanged(null, "orderSequence", from, to);
                 Collections.swap(sequence, a, b);
                 calculator.afterListVariableChanged(null, "orderSequence", from, to);
-            } else if (random.nextBoolean()) {
+            } else if (kind == 1) {
                 Operation op = operations.get(random.nextInt(operations.size()));
                 List<Machine> candidates = op.getCompatibleMachines();
                 calculator.reassignMachine(op, candidates.get(random.nextInt(candidates.size())));
+            } else if (kind == 2) {
+                // Swap sur outillage partagé — la QUATRIÈME famille de prédécesseurs. Sans cette
+                // branche, la file du pool ne serait exercée que par les échanges X, qui la
+                // réordonnent sans jamais en changer la composition.
+                Operation op = operations.get(random.nextInt(operations.size()));
+                List<Tooling> pool = op.getCompatibleToolings();
+                if (pool.isEmpty()) {
+                    continue;
+                }
+                calculator.reassignTooling(op, pool.get(random.nextInt(pool.size())));
             } else {
                 // Réaffectation de metteur : la troisième famille de prédécesseurs. Un
                 // différentiel qui ne ferait que des échanges X et des changements de machine

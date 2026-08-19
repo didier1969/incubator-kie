@@ -52,6 +52,12 @@ public final class FullDataGenerator {
     public static double nonContinuousMachineShare = 0.3;
     /** Nombre moyen de fenêtres de maintenance par machine sur l'horizon. */
     public static double maintenanceWindowsPerMachine = 1.5;
+    /** Nombre de TYPES d'outillage : plusieurs clés (article, passe) partagent un même montage. */
+    public static int toolingTypeCount = 60;
+    /** Exemplaires détenus par type. C'est ce qui rend le pool FINI (CPT-KKI-006). */
+    public static int toolingCopiesPerType = 2;
+    /** Part des opérations dont la mise en train emprunte un outillage. */
+    public static double toolingRequirementShare = 0.4;
 
     public static JobShopSolution generate(int orderCount, long seed) {
         Random random = new Random(seed);
@@ -92,6 +98,22 @@ public final class FullDataGenerator {
             settersByTechnology.add(competent);
         }
         int[] nextSetterOfTechnology = new int[TECHNOLOGIES];
+
+        // Le pool d'outillage : `toolingCopiesPerType` exemplaires interchangeables par type.
+        // MÉMOÏSATION — la plage de valeurs de la réaffectation ne dépend que du type, donc une
+        // liste par type, partagée par toutes les opérations qui l'exigent.
+        List<Tooling> toolings = new ArrayList<>(toolingTypeCount * toolingCopiesPerType);
+        List<List<Tooling>> toolingsByType = new ArrayList<>(toolingTypeCount);
+        for (int type = 0; type < toolingTypeCount; type++) {
+            List<Tooling> copies = new ArrayList<>(toolingCopiesPerType);
+            for (int c = 0; c < toolingCopiesPerType; c++) {
+                Tooling tooling = new Tooling(toolings.size(), type);
+                toolings.add(tooling);
+                copies.add(tooling);
+            }
+            toolingsByType.add(List.copyOf(copies));
+        }
+        int[] nextToolingOfType = new int[toolingTypeCount];
 
         // MÉMOÏSATION — la plage de valeurs de M2 ne dépend que du couple (technologie, niveau) :
         // 50 listes partagées par les 17 515 opérations, construites une fois. Compatibilité
@@ -144,15 +166,28 @@ public final class FullDataGenerator {
                     visited.add(machineId);
                 }
                 int setupKey = setupMatrix.keyOf(articleId, pass);
+                // Le type d'outillage dérive de la CLÉ de mise en train, pas de la machine : le
+                // montage appartient à ce qu'on fabrique, pas à ce sur quoi on le fabrique. Le
+                // tirage est fait sur la clé et non au hasard, pour que deux ordres du même
+                // article se disputent bien le même montage — c'est là qu'est la contention.
+                int requiredToolingType = toolingTypeOf(setupKey);
+                List<Tooling> compatibleToolings = requiredToolingType == Operation.NO_TOOLING
+                        ? List.of()
+                        : toolingsByType.get(requiredToolingType);
+                Tooling tooling = compatibleToolings.isEmpty()
+                        ? null
+                        : compatibleToolings.get(
+                                nextToolingOfType[requiredToolingType]++ % compatibleToolings.size());
                 // Un metteur COMPÉTENT pour cette machine, distribué en rotation pour ne pas
                 // concentrer artificiellement la charge sur le premier de la liste.
                 List<Setter> competent = settersByTechnology.get(technology);
                 Setter setter = competent.get(
                         nextSetterOfTechnology[technology]++ % competent.size());
                 chain.add(new Operation(operationId++, order, pass, duration,
-                        technology, requiredLevel, setupKey,
+                        technology, requiredLevel, setupKey, requiredToolingType,
                         compatibleByTechAndLevel.get(technology).get(requiredLevel),
-                        machines.get((int) machineId), setter));
+                        compatibleToolings,
+                        machines.get((int) machineId), setter, tooling));
             }
             order.setOperations(chain);
             operations.addAll(chain);
@@ -161,8 +196,31 @@ public final class FullDataGenerator {
 
         Schedule schedule = new Schedule();
         schedule.setOrderSequence(new ArrayList<>(orders));
-        return new JobShopSolution(orders, operations, machines, setters, List.of(schedule),
-                setupMatrix, ORIGIN_EPOCH);
+        return new JobShopSolution(orders, operations, machines, setters, toolings,
+                List.of(schedule), setupMatrix, ORIGIN_EPOCH);
+    }
+
+    /**
+     * Le type d'outillage exigé par une clé (article, passe), ou {@link Operation#NO_TOOLING}.
+     *
+     * <p>
+     * Fonction de la clé SEULE, donc déterministe et stable : deux ordres du même article se
+     * disputent bien le même montage, ce qui est là où se trouve la contention. Un tirage au
+     * hasard par opération l'aurait diluée sur tout le pool et rendu la ressource inerte.
+     */
+    private static int toolingTypeOf(int setupKey) {
+        // SplitMix64 — pas de Random ici : la même clé doit toujours donner le même verdict, y
+        // compris entre deux instances. Un simple produit de Knuth modulo une puissance de dix
+        // ne mélange PAS assez les clés consécutives : mesuré, il rendait 31 % d'emprunts pour
+        // une part demandée de 40 %.
+        long mixed = setupKey * 0x9E3779B97F4A7C15L;
+        mixed = (mixed ^ (mixed >>> 30)) * 0xBF58476D1CE4E5B9L;
+        mixed = (mixed ^ (mixed >>> 27)) * 0x94D049BB133111EBL;
+        mixed ^= mixed >>> 31;
+        if ((mixed >>> 11) / (double) (1L << 53) >= toolingRequirementShare) {
+            return Operation.NO_TOOLING;
+        }
+        return setupKey % toolingTypeCount;
     }
 
     /**

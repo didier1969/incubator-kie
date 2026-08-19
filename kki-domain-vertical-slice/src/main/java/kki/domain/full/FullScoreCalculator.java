@@ -14,12 +14,21 @@ import org.optaplanner.core.api.score.calculator.IncrementalScoreCalculator;
  * Calculateur de score du domaine complet (PIL-KKI-004), incrémental.
  *
  * <p>
- * <b>Trois familles de prédécesseurs, pas deux.</b> Une opération attend sa chaîne (la passe
- * précédente du même ordre), sa machine (l'opération précédente sur la ressource) et, depuis que
- * le metteur en train est une ressource comptable, <b>son metteur</b> (la mise en train
- * précédente confiée au même homme). Les trois files sont ordonnées par le même rang topologique
- * {@code (position X, passe)}, donc toutes les arêtes vont du rang faible vers le rang fort :
- * l'acyclicité reste gratuite et chaque nœud se finalise dès son premier dépilement.
+ * <b>Quatre familles de prédécesseurs, pas deux.</b> Une opération attend sa chaîne (la passe
+ * précédente du même ordre), sa machine (l'opération précédente sur la ressource), <b>son
+ * metteur</b> (la mise en train précédente confiée au même homme) et, quand elle en emprunte un,
+ * <b>son outillage</b> (la mise en train précédente qui tenait le même montage). Les quatre files
+ * sont ordonnées par le même rang topologique {@code (position X, passe)}, donc toutes les arêtes
+ * vont du rang faible vers le rang fort : l'acyclicité reste gratuite et chaque nœud se finalise
+ * dès son premier dépilement.
+ *
+ * <p>
+ * <b>Fenêtre d'emprunt de l'outillage — hypothèse explicite.</b> Un exemplaire est pris au début
+ * de la mise en train et rendu à sa FIN ({@code setupEndAt}), conformément à `CPT-KKI-006`
+ * (« emprunté pour la durée de la mise en train et rendu ensuite »). Un montage physiquement
+ * resté en place pendant l'usinage se rendrait à {@code opEnd} — les deux seuls points du fichier
+ * qui décident sont marqués {@code RENDU-OUTILLAGE}, pour que le jour où l'atelier tranche
+ * autrement, le changement soit d'une ligne et non d'une refonte.
  *
  * <p>
  * <b>Chaque ressource a son calendrier.</b> Machine et metteur sont deux ressources au même
@@ -77,9 +86,13 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
     private int[] prevOnSetterId;
     private int[] nextOnSetterId;
     private int[] assignedSetterId;
+    private int[] prevOnToolingId;
+    private int[] nextOnToolingId;
+    private int[] assignedToolingId;
 
     private List<Operation>[] operationsByMachine;
     private List<Operation>[] setupsBySetter;
+    private List<Operation>[] setupsByTooling;
     private PriorityQueue<Operation> worklist;
     private boolean[] queued;
     private long softTotalCents;
@@ -95,6 +108,9 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
     private int[] touchedSetters;
     private boolean[] setterTouched;
     private int touchedSetterCount;
+    private int[] touchedToolings;
+    private boolean[] toolingTouched;
+    private int touchedToolingCount;
     private Order[] dirtyOrders = new Order[256];
     private boolean[] orderDirty;
 
@@ -111,6 +127,7 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         int orderCount = workingSolution.getOrderList().size();
         int machineCount = workingSolution.getMachineList().size();
         int setterCount = workingSolution.getSetterList().size();
+        int toolingCount = workingSolution.getToolingList().size();
 
         opById = new Operation[opCount];
         for (Operation op : operations) {
@@ -133,11 +150,20 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         prevOnSetterId = new int[opCount];
         nextOnSetterId = new int[opCount];
         assignedSetterId = new int[opCount];
+        prevOnToolingId = new int[opCount];
+        nextOnToolingId = new int[opCount];
+        assignedToolingId = new int[opCount];
+        // Les opérations SANS outillage n'entrent dans aucune file, donc relinkTooling ne les
+        // visite jamais : sans ce remplissage elles pointeraient sur l'opération 0 par défaut.
+        Arrays.fill(prevOnToolingId, -1);
+        Arrays.fill(nextOnToolingId, -1);
         queued = new boolean[opCount];
         touchedMachines = new int[machineCount];
         machineTouched = new boolean[machineCount];
         touchedSetters = new int[setterCount];
         setterTouched = new boolean[setterCount];
+        touchedToolings = new int[toolingCount];
+        toolingTouched = new boolean[toolingCount];
         orderDirty = new boolean[orderCount];
 
         buildChains(operations, orderCount);
@@ -161,6 +187,10 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         for (int s = 0; s < setterCount; s++) {
             setupsBySetter[s] = new ArrayList<>();
         }
+        setupsByTooling = new List[toolingCount];
+        for (int t = 0; t < toolingCount; t++) {
+            setupsByTooling[t] = new ArrayList<>();
+        }
 
         List<Order> sequence = schedule.getOrderSequence();
         for (int i = 0; i < sequence.size(); i++) {
@@ -171,8 +201,14 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             rank[opId] = xPosition[(int) op.getOrder().getId()] * RANK_STRIDE + op.getPassIndex();
             assignedMachineId[opId] = (int) op.getMachineId();
             assignedSetterId[opId] = (int) op.getSetter().getId();
+            // -1 = cette mise en train n'emprunte rien : elle n'entre dans aucune file
+            // d'outillage, et ne peut donc jamais être retenue par le pool.
+            assignedToolingId[opId] = op.getTooling() == null ? -1 : (int) op.getTooling().getId();
             operationsByMachine[assignedMachineId[opId]].add(op);
             setupsBySetter[assignedSetterId[opId]].add(op);
+            if (assignedToolingId[opId] >= 0) {
+                setupsByTooling[assignedToolingId[opId]].add(op);
+            }
         }
         for (List<Operation> queue : operationsByMachine) {
             queue.sort(this::byRank);
@@ -180,11 +216,17 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         for (List<Operation> queue : setupsBySetter) {
             queue.sort(this::byRank);
         }
+        for (List<Operation> queue : setupsByTooling) {
+            queue.sort(this::byRank);
+        }
         for (int m = 0; m < machineCount; m++) {
             relinkMachine(operationsByMachine[m]);
         }
         for (int s = 0; s < setterCount; s++) {
             relinkSetter(setupsBySetter[s]);
+        }
+        for (int t = 0; t < toolingCount; t++) {
+            relinkTooling(setupsByTooling[t]);
         }
 
         worklist = new PriorityQueue<>(this::byRank);
@@ -282,6 +324,21 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         }
     }
 
+    private void relinkTooling(List<Operation> queue) {
+        int previous = -1;
+        for (Operation op : queue) {
+            int current = (int) op.getId();
+            prevOnToolingId[current] = previous;
+            if (previous >= 0) {
+                nextOnToolingId[previous] = current;
+            }
+            previous = current;
+        }
+        if (previous >= 0) {
+            nextOnToolingId[previous] = -1;
+        }
+    }
+
     private void insertSorted(List<Operation> queue, Operation op) {
         int key = rank[(int) op.getId()];
         int low = 0;
@@ -302,9 +359,10 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
      *
      * <p>
      * L'ordre des attentes n'est pas arbitraire : la mise en train ne peut commencer que lorsque
-     * la machine EST libre ET que le metteur EST libre, puis elle consomme le temps ouvert DU
-     * METTEUR. La machine, elle, reste immobilisée depuis l'instant où elle s'est libérée —
-     * c'est ce décalage que CPT-KKI-007 fait payer au coût horaire machine.
+     * la machine EST libre, que le metteur EST libre ET que l'outillage EST rendu, puis elle
+     * consomme le temps ouvert DU METTEUR. La machine, elle, reste immobilisée depuis l'instant
+     * où elle s'est libérée — c'est ce décalage que CPT-KKI-007 fait payer au coût horaire
+     * machine.
      */
     private boolean recomputeOperation(int opId, boolean track) {
         Operation op = opById[opId];
@@ -315,12 +373,15 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         long machineFreeAt = machinePredecessor >= 0 ? opEnd[machinePredecessor] : origin;
         int setterPredecessor = prevOnSetterId[opId];
         long setterFreeAt = setterPredecessor >= 0 ? setupEndAt[setterPredecessor] : origin;
+        int toolingPredecessor = prevOnToolingId[opId];
+        // RENDU-OUTILLAGE — l'exemplaire redevient libre à la FIN DE LA MISE EN TRAIN.
+        long toolingFreeAt = toolingPredecessor >= 0 ? setupEndAt[toolingPredecessor] : origin;
 
         long setupSeconds = machinePredecessor >= 0
                 ? setupMatrix.secondsBetween(opById[machinePredecessor].getSetupKey(), op.getSetupKey())
                 : setupMatrix.coldStartSeconds(op.getSetupKey());
 
-        long setupReadyAt = Math.max(machineFreeAt, setterFreeAt);
+        long setupReadyAt = Math.max(Math.max(machineFreeAt, setterFreeAt), toolingFreeAt);
         long setupEnd = setterCalendar[setterId].occupancyEnd(setupReadyAt, setupSeconds);
         long machineIdle = setupEnd - machineFreeAt - setupSeconds;
 
@@ -374,12 +435,17 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
     public ColdSweep coldSweep() {
         int machineCount = machineCalendar.length;
         int setterCount = setterCalendar.length;
+        int toolingCount = setupsByTooling.length;
         long[] machineFree = new long[machineCount];
         long[] setterFree = new long[setterCount];
+        long[] toolingFree = new long[toolingCount];
         int[] lastKeyOnMachine = new int[machineCount];
         Arrays.fill(machineFree, origin);
         Arrays.fill(setterFree, origin);
+        Arrays.fill(toolingFree, origin);
         Arrays.fill(lastKeyOnMachine, -1);
+        long borrowing = 0L;
+        long bound = 0L;
 
         long setter = 0L;
         long idle = 0L;
@@ -398,8 +464,19 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                 long setupSeconds = lastKeyOnMachine[m] < 0
                         ? setupMatrix.coldStartSeconds(op.getSetupKey())
                         : setupMatrix.secondsBetween(lastKeyOnMachine[m], op.getSetupKey());
-                long setupEnd = setterCalendar[s]
-                        .occupancyEnd(Math.max(machineFree[m], setterFree[s]), setupSeconds);
+                int t = op.getTooling() == null ? -1 : (int) op.getTooling().getId();
+                long withoutTooling = Math.max(machineFree[m], setterFree[s]);
+                long setupReadyAt = t < 0 ? withoutTooling : Math.max(withoutTooling, toolingFree[t]);
+                if (t >= 0) {
+                    borrowing++;
+                    // TAUX DE LIAISON — l'outillage retient-il vraiment, ou la contrainte est-elle
+                    // décorative ? Un pool jamais liant rendrait la 4e famille indiscernable d'une
+                    // absence de famille, et le test différentiel ne pourrait pas le voir.
+                    if (toolingFree[t] > withoutTooling) {
+                        bound++;
+                    }
+                }
+                long setupEnd = setterCalendar[s].occupancyEnd(setupReadyAt, setupSeconds);
                 long machineIdle = setupEnd - machineFree[m] - setupSeconds;
                 long finish = machineCalendar[m]
                         .occupancyEnd(Math.max(setupEnd, chainReadyAt), op.getDurationSeconds());
@@ -408,6 +485,10 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                 idle += machineIdle * machineHourlyCents[m] / 3600L;
                 machineFree[m] = finish;
                 setterFree[s] = setupEnd;
+                if (t >= 0) {
+                    // RENDU-OUTILLAGE — rendu à la FIN DE LA MISE EN TRAIN, pas de l'usinage.
+                    toolingFree[t] = setupEnd;
+                }
                 lastKeyOnMachine[m] = op.getSetupKey();
                 chainReadyAt = finish;
             }
@@ -424,7 +505,8 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             }
             hard -= CostModel.hardViolation(order, chainReadyAt);
         }
-        return new ColdSweep(setter, idle, tardiness, earliness, softFreeze, hard, completions);
+        return new ColdSweep(setter, idle, tardiness, earliness, softFreeze, hard, completions,
+                borrowing, bound);
     }
 
     /** Le même ordre au palier libre — isole la part de pénalité de stabilité. */
@@ -433,8 +515,14 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                 order.getDueEpochSec(), Order.FreezeLevel.FREE, order.getReferenceCompletionEpochSec());
     }
 
+    /**
+     * @param toolingBorrowing mises en train qui empruntent un exemplaire du pool
+     * @param toolingBound     celles dont le départ est retenu par l'outillage et par rien
+     *                         d'autre — la mesure qui sépare une contrainte réelle d'un décor
+     */
     public record ColdSweep(long setter, long machineIdle, long tardiness, long earliness,
-            long softFreeze, long hard, long[] completions) {
+            long softFreeze, long hard, long[] completions,
+            long toolingBorrowing, long toolingBound) {
 
         public long soft() {
             return -(setter + machineIdle + tardiness + earliness + softFreeze);
@@ -449,10 +537,13 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             return String.format(
                     "cost_breakdown[%s] total_chf=%.3e setter_chf=%.3e machine_idle_chf=%.3e "
                             + "tardiness_chf=%.3e earliness_chf=%.3e soft_freeze_chf=%.3e "
-                            + "tardiness_over_physical=%.0f%n",
+                            + "tardiness_over_physical=%.0f tooling_borrowing=%d "
+                            + "tooling_bound=%d tooling_binding_rate=%.1f%%%n",
                     label, total / 100.0, setter / 100.0, machineIdle / 100.0, tardiness / 100.0,
                     earliness / 100.0, softFreeze / 100.0,
-                    (double) tardiness / Math.max(1L, setter + machineIdle));
+                    (double) tardiness / Math.max(1L, setter + machineIdle),
+                    toolingBorrowing, toolingBound,
+                    100.0 * toolingBound / Math.max(1L, toolingBorrowing));
         }
     }
 
@@ -600,6 +691,43 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         propagate();
     }
 
+    /**
+     * Change l'exemplaire d'outillage emprunté par une mise en train et repropage — le mouvement
+     * (7) de CPT-KKI-010, « swap sur outillage partagé ».
+     *
+     * <p>
+     * Le TYPE est vérifié ici : deux exemplaires du même type sont interchangeables, deux types
+     * différents ne le sont pas. Et l'écriture se fait des DEUX côtés — l'objet du domaine, que
+     * lit la passe à froid, et le tableau indexé, que lit la propagation incrémentale. N'en
+     * écrire qu'un ferait diverger l'oracle du calcul, et le test différentiel accuserait alors
+     * le côté resté juste.
+     */
+    public void reassignTooling(Operation op, Tooling target) {
+        if (op.getRequiredToolingType() == Operation.NO_TOOLING) {
+            throw new IllegalArgumentException(op + " n'emprunte aucun outillage");
+        }
+        if (target.getType() != op.getRequiredToolingType()) {
+            throw new IllegalArgumentException(
+                    target + " n'est pas du type exigé par " + op + " (type "
+                            + op.getRequiredToolingType() + ")");
+        }
+        int opId = (int) op.getId();
+        int previous = assignedToolingId[opId];
+        int next = (int) target.getId();
+        if (previous == next) {
+            return;
+        }
+        PROPAGATIONS.incrementAndGet();
+        setupsByTooling[previous].remove(op);
+        op.setTooling(target);
+        assignedToolingId[opId] = next;
+        insertSorted(setupsByTooling[next], op);
+        touchTooling(previous);
+        touchTooling(next);
+        flushTouched();
+        propagate();
+    }
+
     // ************************************************************************
     // Hooks OptaPlanner
     // ************************************************************************
@@ -633,6 +761,10 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                 setupsBySetter[assignedSetterId[opId]].remove(opById[opId]);
                 touchMachine(assignedMachineId[opId]);
                 touchSetter(assignedSetterId[opId]);
+                if (assignedToolingId[opId] >= 0) {
+                    setupsByTooling[assignedToolingId[opId]].remove(opById[opId]);
+                    touchTooling(assignedToolingId[opId]);
+                }
             }
         }
         for (int i = fromIndex; i < end; i++) {
@@ -644,6 +776,9 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                 rank[opId] = position * RANK_STRIDE + opById[opId].getPassIndex();
                 insertSorted(operationsByMachine[assignedMachineId[opId]], opById[opId]);
                 insertSorted(setupsBySetter[assignedSetterId[opId]], opById[opId]);
+                if (assignedToolingId[opId] >= 0) {
+                    insertSorted(setupsByTooling[assignedToolingId[opId]], opById[opId]);
+                }
             }
         }
         flushTouched();
@@ -661,6 +796,13 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         if (!setterTouched[setter]) {
             setterTouched[setter] = true;
             touchedSetters[touchedSetterCount++] = setter;
+        }
+    }
+
+    private void touchTooling(int tooling) {
+        if (tooling >= 0 && !toolingTouched[tooling]) {
+            toolingTouched[tooling] = true;
+            touchedToolings[touchedToolingCount++] = tooling;
         }
     }
 
@@ -683,6 +825,15 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             setterTouched[s] = false;
         }
         touchedSetterCount = 0;
+        for (int t = 0; t < touchedToolingCount; t++) {
+            int tool = touchedToolings[t];
+            relinkTooling(setupsByTooling[tool]);
+            for (Operation op : setupsByTooling[tool]) {
+                enqueue((int) op.getId());
+            }
+            toolingTouched[tool] = false;
+        }
+        touchedToolingCount = 0;
     }
 
     private void propagate() {
@@ -706,6 +857,7 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             enqueue(chainSuccessorId[opId]);
             enqueue(nextOnMachineId[opId]);
             enqueue(nextOnSetterId[opId]);
+            enqueue(nextOnToolingId[opId]);
         }
         for (int k = 0; k < dirtyOrderCount; k++) {
             recomputeOrderCost(dirtyOrders[k], true);

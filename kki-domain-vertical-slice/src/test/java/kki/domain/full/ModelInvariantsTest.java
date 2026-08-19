@@ -109,6 +109,50 @@ class ModelInvariantsTest {
     }
 
     @Test
+    void noToolingIsBorrowedTwiceAtOnce() {
+        // Le pool est FINI (CPT-KKI-006) : deux mises en train qui exigent le même exemplaire ne
+        // peuvent pas se chevaucher. Attention, cet invariant SEUL est faible — un emprunt de
+        // durée nulle ne chevauche jamais rien. C'est le test suivant qui le rend concluant.
+        Fixture fixture = Fixture.build();
+        List<List<Operation>> byTooling = new ArrayList<>();
+        for (int i = 0; i < fixture.solution.getToolingList().size(); i++) {
+            byTooling.add(new ArrayList<>());
+        }
+        for (Operation op : fixture.solution.getOperationList()) {
+            if (op.getTooling() != null) {
+                byTooling.get((int) op.getTooling().getId()).add(op);
+            }
+        }
+        for (List<Operation> queue : byTooling) {
+            queue.sort(Comparator.comparingLong(op -> fixture.calculator.setupStartOf((int) op.getId())));
+            for (int i = 1; i < queue.size(); i++) {
+                long previousEnd = fixture.calculator.setupEndOf((int) queue.get(i - 1).getId());
+                long start = fixture.calculator.setupStartOf((int) queue.get(i).getId());
+                assertTrue(start >= previousEnd,
+                        "montage emprunté deux fois à la fois : " + queue.get(i - 1) + " le rend à "
+                                + previousEnd + " et " + queue.get(i) + " le prend à " + start);
+            }
+        }
+    }
+
+    @Test
+    void theToolingPoolActuallyBindsAndIsNotDecoration() {
+        // LA mesure qui sépare un mécanisme d'un décor : combien de mises en train sont retenues
+        // par l'outillage ALORS QUE la machine et le metteur étaient tous deux libres. Si ce
+        // compte est nul, la quatrième famille de prédécesseurs est indiscernable de son absence
+        // et le test différentiel ne peut rien en dire.
+        Fixture fixture = Fixture.build();
+        FullScoreCalculator.ColdSweep sweep = fixture.calculator.coldSweep();
+        assertTrue(sweep.toolingBorrowing() > 0L, "aucune mise en train n'emprunte : pool mort");
+        assertTrue(sweep.toolingBound() > 0L,
+                "le pool ne retient JAMAIS rien : la contrainte est décorative. Emprunts "
+                        + sweep.toolingBorrowing() + ", liaisons " + sweep.toolingBound());
+        System.out.printf("tooling_pool borrowing=%d bound=%d binding_rate=%.1f%%%n",
+                sweep.toolingBorrowing(), sweep.toolingBound(),
+                100.0 * sweep.toolingBound() / Math.max(1L, sweep.toolingBorrowing()));
+    }
+
+    @Test
     void theInstanceActuallyCarriesMaintenanceAndNonContinuousMachines() {
         // Un invariant sur un modèle qui ne contient pas le cas ne prouve rien : on vérifie ici
         // que l'instance exerce bien les deux mécanismes.

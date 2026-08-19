@@ -47,10 +47,11 @@ public final class FullRunner {
         }
 
         JobShopSolution problem = FullDataGenerator.generate(orderCount, 42L);
-        System.out.printf("full_instance orders=%d operations=%d machines=%d setters=%d level_skew=%.1f%n",
+        System.out.printf("full_instance orders=%d operations=%d machines=%d setters=%d"
+                + " toolings=%d level_skew=%.1f%n",
                 problem.getOrderList().size(), problem.getOperationList().size(),
                 problem.getMachineList().size(), problem.getSetterList().size(),
-                FullDataGenerator.levelDemandSkew);
+                problem.getToolingList().size(), FullDataGenerator.levelDemandSkew);
 
         FullScoreCalculator oracle = new FullScoreCalculator();
         oracle.resetWorkingSolution(problem);

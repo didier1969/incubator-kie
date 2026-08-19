@@ -11,8 +11,9 @@ import org.optaplanner.core.api.score.buildin.hardsoftlong.HardSoftLongScore;
 
 /**
  * Le problème complet de PIL-KKI-004 : axe Z, matrice de mise en train (article, passe),
- * calendriers machine et metteur indépendants, compatibilité machine ascendante avec coût
- * horaire croissant, trois paliers de gel, coûts retard et avance quadratiques.
+ * calendriers machine et metteur indépendants, pool d'outillage fini partagé, compatibilité
+ * machine ascendante avec coût horaire croissant, trois paliers de gel, coûts retard et avance
+ * quadratiques.
  *
  * <p>
  * Le score est {@code hard/soft} et les deux composantes ont un sens distinct : le <b>dur</b>
@@ -39,6 +40,11 @@ public class JobShopSolution {
     @ProblemFactCollectionProperty
     private List<Setter> setterList;
 
+    // Le pool d'outillage : fini et partagé (CPT-KKI-006). Troisième ressource exclusive
+    // consommée par une mise en train, au même titre que la machine et le metteur.
+    @ProblemFactCollectionProperty
+    private List<Tooling> toolingList;
+
     @PlanningEntityCollectionProperty
     private List<Schedule> scheduleList;
 
@@ -52,12 +58,13 @@ public class JobShopSolution {
     }
 
     public JobShopSolution(List<Order> orderList, List<Operation> operationList,
-            List<Machine> machineList, List<Setter> setterList, List<Schedule> scheduleList,
-            SetupMatrix setupMatrix, long originEpochSec) {
+            List<Machine> machineList, List<Setter> setterList, List<Tooling> toolingList,
+            List<Schedule> scheduleList, SetupMatrix setupMatrix, long originEpochSec) {
         this.orderList = orderList;
         this.operationList = operationList;
         this.machineList = machineList;
         this.setterList = setterList;
+        this.toolingList = toolingList;
         this.scheduleList = scheduleList;
         this.setupMatrix = setupMatrix;
         this.originEpochSec = originEpochSec;
@@ -77,6 +84,10 @@ public class JobShopSolution {
 
     public List<Setter> getSetterList() {
         return setterList;
+    }
+
+    public List<Tooling> getToolingList() {
+        return toolingList;
     }
 
     public List<Schedule> getScheduleList() {
