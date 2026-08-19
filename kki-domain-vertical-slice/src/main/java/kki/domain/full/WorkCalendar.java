@@ -40,6 +40,9 @@ public final class WorkCalendar {
     /** Machine sans interruption : ouverte 7 jours sur 7, 24 h sur 24. */
     public static final WorkCalendar CONTINUOUS = new WorkCalendar(7, 0L, DAY, new long[0]);
 
+    /** Rendu par {@link #occupancyStart} quand l'occupation ne peut pas tenir avant la borne. */
+    public static final long IMPOSSIBLE = Long.MIN_VALUE / 4;
+
     /** Metteur en train type : lundi à mercredi, 08:00–16:00. */
     public static final WorkCalendar MONDAY_TO_WEDNESDAY_8H =
             new WorkCalendar(3, 8L * 3600L, 8L * 3600L, new long[0]);
@@ -79,20 +82,46 @@ public final class WorkCalendar {
         return patternWorkedBefore(time) - lostUpTo(time);
     }
 
-    /** Inverse : instant réel auquel la ressource a été ouverte {@code workedSeconds} secondes. */
+    /**
+     * Inverse : instant réel auquel la ressource a été ouverte {@code workedSeconds} secondes.
+     *
+     * <p>
+     * <b>Résolu par recherche sur les indisponibilités, pas par itération.</b> La version
+     * précédente cherchait un point fixe — « ajouter la perte, recalculer, recommencer » — et ne
+     * convergeait pas dès qu'une seule fenêtre couvrait PLUSIEURS périodes ouvrées : chaque
+     * itération n'avançait que d'une journée ouvrée, et le compteur de sécurité s'épuisait avant
+     * d'avoir traversé la fenêtre, rendant une date silencieusement trop précoce. Une absence de
+     * metteur de cinq jours couvre trois journées ouvrées : le défaut était donc atteint en
+     * production, pas seulement en théorie. Trouvé par l'aller-retour
+     * {@code occupancyStart(occupancyEnd(t, s), s)} de la passe amont.
+     *
+     * <p>
+     * La grandeur {@code patternWorkedBefore(début_i) - lostBefore[i]} — le temps ouvert NET
+     * disponible avant la fenêtre <i>i</i> — est croissante. Il suffit donc de trouver par
+     * dichotomie la dernière fenêtre entièrement franchie, et d'ajouter sa perte cumulée une
+     * seule fois. Exact, et en O(log n).
+     */
     public long timeAtWorkedSeconds(long workedSeconds) {
-        long candidate = patternTimeAt(workedSeconds);
-        // Chaque indisponibilité franchie repousse d'autant : on itère jusqu'au point fixe, ce
-        // qui converge en au plus une passe par fenêtre traversée.
-        for (int guard = 0; guard <= blackouts.length; guard++) {
-            long lost = lostUpTo(candidate);
-            long next = patternTimeAt(workedSeconds + lost);
-            if (next == candidate) {
-                return candidate;
-            }
-            candidate = next;
+        if (blackouts.length == 0) {
+            return patternTimeAt(workedSeconds);
         }
-        return candidate;
+        int low = 0;
+        int high = blackouts.length / 2; // nombre de fenêtres
+        // Cherche le nombre de fenêtres entièrement franchies pour ce compteur de temps ouvert.
+        while (low < high) {
+            int mid = (low + high) >>> 1;
+            if (netWorkedBeforeWindow(mid) <= workedSeconds) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return patternTimeAt(workedSeconds + lostBefore[low]);
+    }
+
+    /** Temps ouvert net, indisponibilités antérieures déduites, avant le début de la fenêtre. */
+    private long netWorkedBeforeWindow(int window) {
+        return patternWorkedBefore(blackouts[2 * window]) - lostBefore[window];
     }
 
     /**
@@ -105,6 +134,34 @@ public final class WorkCalendar {
             return readyAt;
         }
         return timeAtWorkedSeconds(workedSecondsBefore(readyAt) + workSeconds);
+    }
+
+    /**
+     * Inverse d'{@link #occupancyEnd} : instant le plus TARDIF auquel commencer une occupation de
+     * {@code workSeconds} secondes de temps ouvert pour l'avoir terminée au plus tard à
+     * {@code finishBy}. C'est ce que demande la passe amont de `CPT-KKI-003`.
+     *
+     * <p>
+     * Deux points qui ressemblent à des erreurs et n'en sont pas :
+     * <ul>
+     * <li>quand la ressource n'a pas assez d'heures ouvertes avant {@code finishBy}, le solde
+     * demandé devient négatif ; {@link #patternTimeAt} produirait alors n'importe quoi par
+     * troncature de division. On rend {@code Long.MIN_VALUE / 4}, une date impossible que
+     * l'appelant reconnaît, plutôt qu'une date silencieusement fausse ;</li>
+     * <li>{@link #timeAtWorkedSeconds} rend l'instant le plus TARDIF de sa classe d'équivalence
+     * (lundi 16:00 et mardi 08:00 valent le même compteur de temps ouvert ; c'est mardi 08:00 qui
+     * est rendu). Pour une date au plus tard, c'est exactement la borne voulue.</li>
+     * </ul>
+     */
+    public long occupancyStart(long finishBy, long workSeconds) {
+        if (workSeconds <= 0L) {
+            return finishBy;
+        }
+        long available = workedSecondsBefore(finishBy);
+        if (available < workSeconds) {
+            return IMPOSSIBLE;
+        }
+        return timeAtWorkedSeconds(available - workSeconds);
     }
 
     /**

@@ -69,6 +69,7 @@ public final class FullRunner {
                 randomOrderCost / 100.0, startCost / 100.0,
                 100.0 * (randomOrderCost - startCost) / (double) randomOrderCost);
         System.out.print(oracle.coldSweep().describe("depart"));
+        System.out.print(oracle.backwardSweep().describe("depart", startCost));
         System.out.print(oracle.latenessProfile("depart"));
 
         ScoreDirectorFactoryConfig scoreDirectorFactoryConfig = new ScoreDirectorFactoryConfig();
@@ -100,6 +101,8 @@ public final class FullRunner {
 
         oracle.resetWorkingSolution(solved);
         System.out.print(oracle.coldSweep().describe("arrivee"));
+        System.out.print(oracle.backwardSweep()
+                .describe("arrivee", -oracle.fullSweepScore().getSoftScore()));
 
         long endCost = -solved.getScore().getSoftScore();
         long calls = FullScoreCalculator.CALCULATE_SCORE_CALLS.get();

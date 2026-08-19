@@ -377,9 +377,7 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         // RENDU-OUTILLAGE — l'exemplaire redevient libre à la FIN DE LA MISE EN TRAIN.
         long toolingFreeAt = toolingPredecessor >= 0 ? setupEndAt[toolingPredecessor] : origin;
 
-        long setupSeconds = machinePredecessor >= 0
-                ? setupMatrix.secondsBetween(opById[machinePredecessor].getSetupKey(), op.getSetupKey())
-                : setupMatrix.coldStartSeconds(op.getSetupKey());
+        long setupSeconds = setupSecondsOf(opId);
 
         long setupReadyAt = Math.max(Math.max(machineFreeAt, setterFreeAt), toolingFreeAt);
         long setupEnd = setterCalendar[setterId].occupancyEnd(setupReadyAt, setupSeconds);
@@ -405,6 +403,19 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         opStart[opId] = start;
         opEnd[opId] = end;
         return changed;
+    }
+
+    /**
+     * Mise en train à payer pour amener cette opération sur SA machine, telle que la séquence
+     * courante la laisse. Une seule définition : la passe aval et la passe amont doivent lire la
+     * même, sinon la marge se calcule contre une durée qui n'a jamais été datée.
+     */
+    private long setupSecondsOf(int opId) {
+        int machinePredecessor = prevOnMachineId[opId];
+        return machinePredecessor >= 0
+                ? setupMatrix.secondsBetween(opById[machinePredecessor].getSetupKey(),
+                        opById[opId].getSetupKey())
+                : setupMatrix.coldStartSeconds(opById[opId].getSetupKey());
     }
 
     private void recomputeOrderCost(Order order, boolean track) {
@@ -569,6 +580,160 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         return String.format("lateness[%s] late=%d/%d p10=%dh median=%dh p90=%dh max=%dh%n",
                 label, late, lateness.length, sorted[sorted.length / 10], sorted[sorted.length / 2],
                 sorted[sorted.length * 9 / 10], sorted[sorted.length - 1]);
+    }
+
+
+    // ************************************************************************
+    // Passe amont — la date d'une opération est un INTERVALLE, pas une valeur
+    // ************************************************************************
+
+    /**
+     * Datation au plus tard, à séquence INCHANGÉE — la seconde moitié de « calcul aval puis
+     * amont » de `CPT-KKI-003`, et l'invariant 7 de `CPT-KKI-012`.
+     *
+     * <p>
+     * <b>Ce que ça calcule.</b> Pour chaque opération, la date la plus tardive à laquelle elle
+     * peut se placer sans repousser quoi que ce soit : ni la passe suivante de son ordre, ni
+     * l'opération suivante sur sa machine, ni la mise en train suivante de son metteur ou de son
+     * outillage. La différence avec la date au plus tôt est la <b>marge</b> — qui n'existait pas
+     * dans le modèle tant que cette passe manquait.
+     *
+     * <p>
+     * <b>Pourquoi l'ordre de parcours est gratuit.</b> Les quatre familles de successeurs sont
+     * ordonnées sur le même rang {@code (position X, passe)} que la passe aval. Le parcours par
+     * rang DÉCROISSANT visite donc tout successeur avant son prédécesseur, exactement comme le
+     * rang croissant fait l'inverse. Aucune structure supplémentaire.
+     *
+     * <p>
+     * <b>Pourquoi ce n'est PAS incrémental.</b> Le score reste assis sur les dates au plus tôt.
+     * Rendre cette passe incrémentale ajouterait une cinquième structure à un chemin chaud qui
+     * repropage déjà 23 % du modèle par mouvement, pour une information que le score ne consomme
+     * pas. Basculer le score sur la datation JIT est une décision mesurable, avec son propre
+     * relevé — pas un effet de bord de celle-ci.
+     *
+     * <p>
+     * <b>L'initialisation de la dernière passe, qui décide de tout.</b> On borne par
+     * {@code max(date due, date au plus tôt)} et non par la date due seule. Sur une instance
+     * chargée, tous les ordres sont en retard : borner par la date due donnerait une marge
+     * NÉGATIVE partout et ferait tomber {@code au plus tôt ≤ au plus tard} sur l'instance
+     * entière — un test rouge qui accuserait la propagation alors que l'initialisation serait
+     * seule en cause. Un ordre déjà en retard a une marge nulle, ce qui est la lecture juste :
+     * rien ne peut y être décalé.
+     */
+    public BackwardSweep backwardSweep() {
+        int opCount = opById.length;
+        long[] latestEnd = new long[opCount];
+        long[] latestStart = new long[opCount];
+        long[] latestSetupEnd = new long[opCount];
+        long[] latestSetupStart = new long[opCount];
+
+        Operation[] descending = opById.clone();
+        Arrays.sort(descending, (a, b) -> Integer.compare(rank[(int) b.getId()], rank[(int) a.getId()]));
+
+        for (Operation op : descending) {
+            int opId = (int) op.getId();
+            int chainNext = chainSuccessorId[opId];
+            long bound = chainNext < 0
+                    ? Math.max(op.getOrder().getDueEpochSec(), opEnd[opId])
+                    : latestStart[chainNext];
+            int machineNext = nextOnMachineId[opId];
+            if (machineNext >= 0) {
+                bound = Math.min(bound, latestSetupStart[machineNext]);
+            }
+            latestEnd[opId] = bound;
+            latestStart[opId] = machineCalendar[assignedMachineId[opId]]
+                    .occupancyStart(bound, op.getDurationSeconds());
+
+            long setupBound = latestStart[opId];
+            int setterNext = nextOnSetterId[opId];
+            if (setterNext >= 0) {
+                setupBound = Math.min(setupBound, latestSetupStart[setterNext]);
+            }
+            int toolingNext = nextOnToolingId[opId];
+            if (toolingNext >= 0) {
+                setupBound = Math.min(setupBound, latestSetupStart[toolingNext]);
+            }
+            latestSetupEnd[opId] = setupBound;
+            latestSetupStart[opId] = setterCalendar[assignedSetterId[opId]]
+                    .occupancyStart(setupBound, setupSecondsOf(opId));
+        }
+
+        // Coût du MÊME plan daté au plus tard. La formule du temps machine immobilisé est celle
+        // de la passe aval, terme pour terme : la machine se libère à la fin de l'opération
+        // précédente et reste prise jusqu'à la fin de la mise en train suivante.
+        long jitSetter = 0L;
+        long jitIdle = 0L;
+        long jitTardiness = 0L;
+        long jitEarliness = 0L;
+        long jitSoftFreeze = 0L;
+        long slackSeconds = 0L;
+        long opsWithSlack = 0L;
+        long ordersWithSlack = 0L;
+        long[] jitCompletions = new long[orderCents.length];
+
+        for (Operation op : opById) {
+            int opId = (int) op.getId();
+            long slack = latestStart[opId] - opStart[opId];
+            if (slack > 0L) {
+                slackSeconds += slack;
+                opsWithSlack++;
+            }
+            long setupSeconds = setupSecondsOf(opId);
+            int machinePrevious = prevOnMachineId[opId];
+            long machineFreeAt = machinePrevious >= 0 ? latestEnd[machinePrevious] : origin;
+            jitSetter += setupSeconds * CostModel.SETTER_CENTS_PER_HOUR / 3600L;
+            jitIdle += Math.max(0L, latestSetupEnd[opId] - machineFreeAt - setupSeconds)
+                    * machineHourlyCents[assignedMachineId[opId]] / 3600L;
+        }
+
+        for (Order order : schedule.getOrderSequence()) {
+            int oi = (int) order.getId();
+            long completion = latestEnd[lastOpIdOfOrder[oi]];
+            jitCompletions[oi] = completion;
+            if (completion > opEnd[lastOpIdOfOrder[oi]]) {
+                ordersWithSlack++;
+            }
+            long total = CostModel.orderCents(order, completion);
+            long freeze = order.getFreezeLevel() == Order.FreezeLevel.SOFT
+                    ? total - CostModel.orderCents(asFree(order), completion)
+                    : 0L;
+            jitSoftFreeze += freeze;
+            if (completion > order.getDueEpochSec()) {
+                jitTardiness += total - freeze;
+            } else {
+                jitEarliness += total - freeze;
+            }
+        }
+        return new BackwardSweep(latestSetupStart, latestSetupEnd, latestStart, latestEnd,
+                jitCompletions, jitSetter, jitIdle, jitTardiness, jitEarliness, jitSoftFreeze,
+                slackSeconds, opsWithSlack, ordersWithSlack);
+    }
+
+    /**
+     * @param opsWithSlack    opérations dont la date au plus tard est STRICTEMENT après la date
+     *                        au plus tôt — zéro voudrait dire que la passe amont n'apprend rien
+     *                        sur cette instance, et rendrait les invariants de M3 creux
+     * @param ordersWithSlack ordres dont la complétion peut être retardée sans coût
+     */
+    public record BackwardSweep(long[] latestSetupStart, long[] latestSetupEnd, long[] latestStart,
+            long[] latestEnd, long[] jitCompletions, long jitSetter, long jitMachineIdle,
+            long jitTardiness, long jitEarliness, long jitSoftFreeze, long slackSeconds,
+            long opsWithSlack, long ordersWithSlack) {
+
+        /** Coût total du plan daté au plus tard, en centimes. */
+        public long jitCostCents() {
+            return jitSetter + jitMachineIdle + jitTardiness + jitEarliness + jitSoftFreeze;
+        }
+
+        public String describe(String label, long earliestCostCents) {
+            return String.format(
+                    "jit[%s] jit_chf=%.3e earliest_chf=%.3e gain_pct=%.4f ops_with_slack=%d"
+                            + " orders_with_slack=%d mean_slack_h=%.1f%n",
+                    label, jitCostCents() / 100.0, earliestCostCents / 100.0,
+                    100.0 * (earliestCostCents - jitCostCents()) / Math.max(1L, earliestCostCents),
+                    opsWithSlack, ordersWithSlack,
+                    slackSeconds / 3600.0 / Math.max(1L, opsWithSlack));
+        }
     }
 
     // ************************************************************************
