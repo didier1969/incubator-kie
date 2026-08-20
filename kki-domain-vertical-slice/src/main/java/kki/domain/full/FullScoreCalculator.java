@@ -53,6 +53,14 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
     public static final AtomicLong ORDER_COMPLETION_CHANGES = new AtomicLong();
     public static final AtomicLong PROPAGATIONS = new AtomicLong();
 
+    /**
+     * Opérations ENFILÉES par {@code flushTouched}, contre celles dont la date change vraiment
+     * ({@code DIRTY_OPERATIONS}). L'écart entre les deux est du travail pur : recalculer une
+     * opération pour constater qu'elle n'a pas bougé coûte le calcul complet de ses quatre
+     * attentes et deux appels de calendrier.
+     */
+    public static final AtomicLong ENQUEUED_OPERATIONS = new AtomicLong();
+
     /** Référence vivante, pour que le sélecteur guidé lise les arcs tendus sans tout recalculer. */
 
     private JobShopSolution solution;
@@ -1335,6 +1343,7 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
     private void enqueue(int opId) {
         if (opId >= 0 && !queued[opId]) {
             queued[opId] = true;
+            ENQUEUED_OPERATIONS.incrementAndGet();
             worklist.add(opById[opId]);
         }
     }

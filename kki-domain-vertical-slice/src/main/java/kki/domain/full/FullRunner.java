@@ -174,6 +174,7 @@ public final class FullRunner {
         FullScoreCalculator.DIRTY_OPERATIONS.set(0L);
         FullScoreCalculator.ORDER_COMPLETION_CHANGES.set(0L);
         FullScoreCalculator.PROPAGATIONS.set(0L);
+        FullScoreCalculator.ENQUEUED_OPERATIONS.set(0L);
 
         long startNanos = System.nanoTime();
         JobShopSolution solved;
@@ -221,7 +222,7 @@ public final class FullRunner {
                         + "start_cost_chf=%.0f end_cost_chf=%.0f soft_reduction_pct=%.2f "
                         + "hard_start=%d hard_end=%d hard_reduction_pct=%.2f verdict=%s "
                         + "dirty_per_propagation=%.1f order_changes_per_propagation=%.1f"
-                        + " cost_relevant_pct=%.2f%n",
+                        + " cost_relevant_pct=%.2f enqueued=%d wasted_recompute_pct=%.1f%n",
                 variant, start, seed, orderCount, elapsed, calls / elapsed, propagations,
                 startCost / 100.0, endCost / 100.0,
                 startCost == 0L ? 0.0 : 100.0 * (startCost - endCost) / (double) startCost,
@@ -229,7 +230,13 @@ public final class FullRunner {
                 startHard == 0L ? 0.0 : 100.0 * (startHard - endHard) / (double) startHard,
                 verdict,
                 (double) dirty / propagations, (double) orderChanges / propagations,
-                dirty == 0L ? 0.0 : 100.0 * orderChanges / dirty);
+                dirty == 0L ? 0.0 : 100.0 * orderChanges / dirty,
+                FullScoreCalculator.ENQUEUED_OPERATIONS.get(),
+                // Part des recalculs qui ne changent RIEN : le travail que la propagation fait
+                // pour constater qu'une opération n'a pas bougé.
+                FullScoreCalculator.ENQUEUED_OPERATIONS.get() == 0L ? 0.0
+                        : 100.0 * (FullScoreCalculator.ENQUEUED_OPERATIONS.get() - dirty)
+                                / FullScoreCalculator.ENQUEUED_OPERATIONS.get());
         if (variant == Variant.M4) {
             System.out.printf("reassignment attempts=%d accepted=%d%n",
                     ResourceReassignmentPhaseCommand.attempts,
