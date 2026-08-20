@@ -164,6 +164,10 @@ class MixedEntityClassesTest {
             this.id = id;
         }
 
+        public int getId() {
+            return id;
+        }
+
         @Override
         public String toString() {
             return "Slot" + id;
@@ -176,6 +180,10 @@ class MixedEntityClassesTest {
 
         public Post(int id) {
             this.id = id;
+        }
+
+        public int getId() {
+            return id;
         }
 
         @Override

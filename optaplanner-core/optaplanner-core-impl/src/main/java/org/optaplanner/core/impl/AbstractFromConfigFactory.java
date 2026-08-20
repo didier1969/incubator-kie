@@ -78,6 +78,32 @@ public abstract class AbstractFromConfigFactory<Solution_, Config_ extends Abstr
         return entityDescriptor;
     }
 
+    /**
+     * Returns the entity class that declares a planning LIST variable, for a config that can only
+     * ever apply to one.
+     * <p>
+     * {@link #getTheOnlyEntityDescriptor(SolutionDescriptor)} refuses to deduce as soon as the
+     * solution declares more than one entity class, even when only one of them could possibly be
+     * meant. A list move selector applies to a list variable, so the entity that declares one is
+     * not a guess: mixing an entity with a list variable and an entity with a basic variable is a
+     * supported domain model, and it was the only thing standing in the way of using the generic
+     * list selectors on such a model.
+     * <p>
+     * The strict behaviour is kept whenever the choice is genuinely ambiguous - zero or several
+     * entity classes declaring a list variable both fall back to
+     * {@link #getTheOnlyEntityDescriptor(SolutionDescriptor)} and its error message.
+     */
+    protected EntityDescriptor<Solution_> getTheOnlyEntityDescriptorWithListVariable(
+            SolutionDescriptor<Solution_> solutionDescriptor) {
+        List<EntityDescriptor<Solution_>> entityDescriptors = solutionDescriptor.getGenuineEntityDescriptors().stream()
+                .filter(EntityDescriptor::hasAnyGenuineListVariables)
+                .collect(Collectors.toList());
+        if (entityDescriptors.size() != 1) {
+            return getTheOnlyEntityDescriptor(solutionDescriptor);
+        }
+        return entityDescriptors.get(0);
+    }
+
     protected EntityDescriptor<Solution_> getTheOnlyEntityDescriptor(SolutionDescriptor<Solution_> solutionDescriptor) {
         Collection<EntityDescriptor<Solution_>> entityDescriptors = solutionDescriptor.getGenuineEntityDescriptors();
         if (entityDescriptors.size() != 1) {

@@ -56,7 +56,8 @@ public class ListSwapMoveSelectorFactory<Solution_>
         ValueSelectorConfig secondaryValueSelectorConfig =
                 Objects.requireNonNullElse(config.getSecondaryValueSelectorConfig(), valueSelectorConfig);
         SelectionOrder selectionOrder = SelectionOrder.fromRandomSelectionBoolean(randomSelection);
-        EntityDescriptor<Solution_> entityDescriptor = getTheOnlyEntityDescriptor(configPolicy.getSolutionDescriptor());
+        EntityDescriptor<Solution_> entityDescriptor =
+                getTheOnlyEntityDescriptorWithListVariable(configPolicy.getSolutionDescriptor());
         EntityIndependentValueSelector<Solution_> leftValueSelector = buildEntityIndependentValueSelector(configPolicy,
                 entityDescriptor, valueSelectorConfig, minimumCacheType, selectionOrder);
         EntityIndependentValueSelector<Solution_> rightValueSelector = buildEntityIndependentValueSelector(configPolicy,
@@ -97,7 +98,8 @@ public class ListSwapMoveSelectorFactory<Solution_>
 
     @Override
     protected MoveSelectorConfig<?> buildUnfoldedMoveSelectorConfig(HeuristicConfigPolicy<Solution_> configPolicy) {
-        EntityDescriptor<Solution_> entityDescriptor = getTheOnlyEntityDescriptor(configPolicy.getSolutionDescriptor());
+        EntityDescriptor<Solution_> entityDescriptor =
+                getTheOnlyEntityDescriptorWithListVariable(configPolicy.getSolutionDescriptor());
         GenuineVariableDescriptor<Solution_> onlyVariableDescriptor = config.getValueSelectorConfig() == null ? null
                 : ValueSelectorFactory.<Solution_> create(config.getValueSelectorConfig())
                         .extractVariableDescriptor(configPolicy, entityDescriptor);

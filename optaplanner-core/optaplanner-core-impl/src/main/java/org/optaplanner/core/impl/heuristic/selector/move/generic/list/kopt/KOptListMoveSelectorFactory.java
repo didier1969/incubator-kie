@@ -55,7 +55,8 @@ public final class KOptListMoveSelectorFactory<Solution_>
         ValueSelectorConfig valueSelectorConfig =
                 Objects.requireNonNullElseGet(config.getValueSelectorConfig(), ValueSelectorConfig::new);
 
-        EntityDescriptor<Solution_> entityDescriptor = getTheOnlyEntityDescriptor(configPolicy.getSolutionDescriptor());
+        EntityDescriptor<Solution_> entityDescriptor =
+                getTheOnlyEntityDescriptorWithListVariable(configPolicy.getSolutionDescriptor());
 
         EntityIndependentValueSelector<Solution_> originSelector =
                 buildEntityIndependentValueSelector(configPolicy, entityDescriptor, originSelectorConfig, minimumCacheType,
