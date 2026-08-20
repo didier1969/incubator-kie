@@ -52,7 +52,7 @@ public class NextElementVariableListener<Solution_> implements ListVariableListe
             Object next = listVariable.get(i + 1);
             innerScoreDirector.beforeVariableChanged(shadowVariableDescriptor, element);
             shadowVariableDescriptor.setValue(element, next);
-            innerScoreDirector.beforeVariableChanged(shadowVariableDescriptor, element);
+            innerScoreDirector.afterVariableChanged(shadowVariableDescriptor, element);
         }
     }
 
@@ -69,7 +69,7 @@ public class NextElementVariableListener<Solution_> implements ListVariableListe
             Object element = listVariable.get(i);
             innerScoreDirector.beforeVariableChanged(shadowVariableDescriptor, element);
             shadowVariableDescriptor.setValue(element, null);
-            innerScoreDirector.beforeVariableChanged(shadowVariableDescriptor, element);
+            innerScoreDirector.afterVariableChanged(shadowVariableDescriptor, element);
         }
     }
 
