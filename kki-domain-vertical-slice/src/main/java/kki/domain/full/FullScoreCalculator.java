@@ -54,7 +54,6 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
     public static final AtomicLong PROPAGATIONS = new AtomicLong();
 
     /** Référence vivante, pour que le sélecteur guidé lise les arcs tendus sans tout recalculer. */
-    public static volatile FullScoreCalculator LIVE;
 
     private JobShopSolution solution;
     private Schedule schedule;
@@ -230,7 +229,6 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         }
 
         worklist = new PriorityQueue<>(this::byRank);
-        LIVE = this;
         fullRebuild();
     }
 

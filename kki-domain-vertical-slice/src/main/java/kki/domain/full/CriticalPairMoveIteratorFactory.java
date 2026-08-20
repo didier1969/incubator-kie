@@ -29,7 +29,7 @@ import org.optaplanner.core.impl.heuristic.selector.move.factory.MoveIteratorFac
  * coûte alors même pas la construction du mouvement.
  *
  * <p>
- * L'état est lu sur le calculateur vivant ({@link FullScoreCalculator#LIVE}). Recalculer les dates
+ * L'état est lu sur le calculateur du directeur de score courant. Recalculer les dates
  * à chaque pas pour choisir un mouvement ruinerait le débit que ce choix sert à améliorer — le
  * pont d'OptaPlanner recrée l'itérateur à chaque pas, les arcs tendus sont donc toujours ceux de
  * l'instant.
@@ -96,6 +96,7 @@ public final class CriticalPairMoveIteratorFactory
             ScoreDirector<JobShopSolution> scoreDirector, Random workingRandom) {
         Schedule schedule = scoreDirector.getWorkingSolution().getScheduleList().get(0);
         int orderCount = schedule.getOrderSequence().size();
+        FullScoreCalculator calculator = WorkcenterReassignmentMove.calculatorOf(scoreDirector);
         return new Iterator<>() {
 
             @Override
@@ -105,10 +106,11 @@ public final class CriticalPairMoveIteratorFactory
 
             @Override
             public Move<JobShopSolution> next() {
-                FullScoreCalculator live = FullScoreCalculator.LIVE;
-                if (live == null) {
-                    throw new NoSuchElementException("aucun calculateur vivant");
-                }
+                // Le calculateur du directeur QUI NOUS A CRÉÉS, résolu une fois à la
+                // construction de l'itérateur. Le champ statique qui vivait ici désignait un
+                // directeur quelconque dès que le moteur en tient plusieurs (FULL_ASSERT,
+                // multi-thread) : le guidage lisait alors l'état d'une autre solution.
+                FullScoreCalculator live = calculator;
                 if (workingRandom.nextDouble() < reassignmentShare) {
                     Move<JobShopSolution> reassignment = nextReassignment(live, workingRandom);
                     if (reassignment != null) {

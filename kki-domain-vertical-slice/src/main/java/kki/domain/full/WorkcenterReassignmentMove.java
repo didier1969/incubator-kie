@@ -6,6 +6,7 @@ import java.util.List;
 
 import org.optaplanner.core.api.score.director.ScoreDirector;
 import org.optaplanner.core.impl.heuristic.move.AbstractMove;
+import org.optaplanner.core.impl.score.director.incremental.IncrementalScoreDirector;
 
 /**
  * Le SECOND mouvement du paradigme : déplacer une opération vers un autre workcenter compatible.
@@ -69,16 +70,32 @@ public final class WorkcenterReassignmentMove extends AbstractMove<JobShopSoluti
         return new WorkcenterReassignmentMove(schedule, operation, operation.getMachine());
     }
 
+    /**
+     * Le calculateur se demande AU DIRECTEUR DE SCORE qui exécute ce mouvement, et jamais à un
+     * champ statique.
+     *
+     * <p>
+     * L'ancienne version lisait {@code FullScoreCalculator.LIVE}. Sous
+     * {@code EnvironmentMode.FULL_ASSERT} le moteur tient DEUX directeurs de score — celui de
+     * travail et celui qui recalcule à partir de rien — et chacun écrit {@code LIVE = this} en
+     * s'initialisant. Un champ statique ne désigne qu'un objet : le mouvement s'appliquait donc
+     * sur la solution de l'autre directeur. Mesuré, pas supposé : le détecteur du moteur a rendu
+     * {@code Score corruption (25307413soft)} sur un {@code Reassign(Op100@M253) -> M253} dont la
+     * source et la cible étaient le même poste — un no-op que {@code isMoveDoable} avait bien
+     * refusé, mais sur l'autre solution.
+     */
     @Override
     protected void doMoveOnGenuineVariables(ScoreDirector<JobShopSolution> scoreDirector) {
-        FullScoreCalculator live = FullScoreCalculator.LIVE;
-        if (live == null || live.getWorkingSolution() != scoreDirector.getWorkingSolution()) {
-            // Échouer bruyamment plutôt que réaffecter sur le mauvais directeur de score : le
-            // score rendu serait juste, et le plan modifié serait un autre.
+        calculatorOf(scoreDirector).reassignMachine(operation, target);
+    }
+
+    /** Le calculateur incrémental du directeur PASSÉ EN ARGUMENT, sans état partagé. */
+    static FullScoreCalculator calculatorOf(ScoreDirector<JobShopSolution> scoreDirector) {
+        if (!(scoreDirector instanceof IncrementalScoreDirector<JobShopSolution, ?> incremental)) {
             throw new IllegalStateException(
-                    "le calculateur vivant ne porte pas la solution de travail de ce mouvement");
+                    "ce mouvement exige un directeur de score incrémental, reçu " + scoreDirector);
         }
-        live.reassignMachine(operation, target);
+        return (FullScoreCalculator) incremental.getIncrementalScoreCalculator();
     }
 
     /**

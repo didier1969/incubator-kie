@@ -41,13 +41,9 @@ public class ResourceReassignmentPhaseCommand implements CustomPhaseCommand<JobS
     @Override
     public void changeWorkingSolution(ScoreDirector<JobShopSolution> scoreDirector) {
         JobShopSolution solution = scoreDirector.getWorkingSolution();
-        FullScoreCalculator calculator = FullScoreCalculator.LIVE;
-        if (calculator == null || calculator.getWorkingSolution() != solution) {
-            // Échouer bruyamment plutôt que de réaffecter sur le mauvais directeur de score :
-            // le score rapporté serait alors juste, et le plan modifié serait un autre.
-            throw new IllegalStateException(
-                    "le calculateur vivant ne porte pas la solution de travail de cette phase");
-        }
+        // Le calculateur du directeur qui exécute cette phase. Le champ statique lu ici
+        // désignait un directeur quelconque dès que le moteur en tient plusieurs.
+        FullScoreCalculator calculator = WorkcenterReassignmentMove.calculatorOf(scoreDirector);
 
         List<Operation> operations = solution.getOperationList();
         List<Setter> setters = solution.getSetterList();
