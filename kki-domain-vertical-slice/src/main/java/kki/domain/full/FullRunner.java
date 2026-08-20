@@ -266,11 +266,40 @@ public final class FullRunner {
                 localSearchOf(Variant.M3, seconds - seconds / 2));
     }
 
+    /**
+     * Critère d'acceptation, réglable par {@code -Dkki.acceptor=…} et {@code -Dkki.acceptorSize=…}.
+     *
+     * <p>
+     * Le banc n'en configurait AUCUN : il prenait le défaut du moteur — Late Acceptance, taille
+     * 400 — sans que ce soit un choix. Toutes les mesures antérieures portent donc sur ce réglage
+     * hérité, et aucune comparaison n'a jamais été faite. C'est une dimension du banc au sens de
+     * {@code DEC-KKI-005}, et une dimension du banc se balaie.
+     *
+     * <p>
+     * {@code null} conserve le défaut du moteur, pour que les mesures d'hier restent rejouables
+     * telles quelles.
+     */
+    public static String acceptorType = System.getProperty("kki.acceptor");
+
+    /** Taille de la file du critère (Late Acceptance, Step Counting, Tabu selon le type). */
+    public static Integer acceptorSize = Integer.getInteger("kki.acceptorSize");
+
     private static LocalSearchPhaseConfig localSearchOf(Variant variant, long seconds) {
         TerminationConfig termination = new TerminationConfig();
         termination.setSecondsSpentLimit(seconds);
         LocalSearchPhaseConfig localSearch = new LocalSearchPhaseConfig();
         localSearch.setTerminationConfig(termination);
+        if (acceptorType != null) {
+            localSearch.setLocalSearchType(
+                    org.optaplanner.core.config.localsearch.LocalSearchType.valueOf(acceptorType));
+            if (acceptorSize != null) {
+                // Le TYPE et la TAILLE ne se configurent pas ensemble dans le moteur : passer un
+                // acceptorConfig avec un localSearchType lève. On repasse donc par l'acceptor
+                // explicite, en traduisant le type vers sa file correspondante.
+                localSearch.setLocalSearchType(null);
+                localSearch.setAcceptorConfig(acceptorOf(acceptorType, acceptorSize));
+            }
+        }
         localSearch.setMoveSelectorConfig(switch (variant) {
             case M1 -> selector(false, 0.0);
             case M5 -> selector(true, reassignmentShare);
@@ -309,6 +338,39 @@ public final class FullRunner {
     private static long softCostOf(FullScoreCalculator oracle, JobShopSolution problem) {
         oracle.resetWorkingSolution(problem);
         return -oracle.fullSweepScore().getSoftScore();
+    }
+
+    /**
+     * Traduit un type de recherche locale en critère d'acceptation explicite, taille comprise.
+     *
+     * <p>
+     * Chaque type a SA file et son paramètre : la taille de Late Acceptance n'est pas celle du
+     * tabou, qui n'est pas le compteur de pas. Les mélanger produirait une comparaison entre des
+     * grandeurs qui n'ont pas la même unité.
+     */
+    private static org.optaplanner.core.config.localsearch.decider.acceptor.LocalSearchAcceptorConfig
+            acceptorOf(String type, int size) {
+        var config = new org.optaplanner.core.config.localsearch.decider.acceptor.LocalSearchAcceptorConfig();
+        var acceptorType = org.optaplanner.core.config.localsearch.decider.acceptor.AcceptorType.class;
+        switch (type) {
+            case "LATE_ACCEPTANCE" -> {
+                config.setAcceptorTypeList(List.of(Enum.valueOf(acceptorType, "LATE_ACCEPTANCE")));
+                config.setLateAcceptanceSize(size);
+            }
+            case "TABU_SEARCH" -> {
+                config.setAcceptorTypeList(List.of(Enum.valueOf(acceptorType, "ENTITY_TABU")));
+                config.setEntityTabuSize(size);
+            }
+            case "GREAT_DELUGE" -> {
+                config.setAcceptorTypeList(List.of(Enum.valueOf(acceptorType, "GREAT_DELUGE")));
+                config.setGreatDelugeWaterLevelIncrementRatio(size / 100_000.0);
+            }
+            case "HILL_CLIMBING" ->
+                config.setAcceptorTypeList(List.of(Enum.valueOf(acceptorType, "HILL_CLIMBING")));
+            default -> throw new IllegalArgumentException(
+                    "taille non applicable au type " + type + " — retirer -Dkki.acceptorSize");
+        }
+        return config;
     }
 
     /** Part du budget de tirage donnée au second mouvement. Dimension du banc, balayable. */
