@@ -109,6 +109,26 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
     // seconde, se paie en ramasse-miettes.
     private Order[] movedOrders = new Order[16];
     private int movedCount;
+    /**
+     * Position MINIMALE touchée dans la file de chaque ressource, ou {@link Integer#MAX_VALUE}
+     * quand elle est inconnue.
+     *
+     * <p>
+     * Les files sont triées par rang, donc une insertion ou un retrait en position <i>k</i> ne
+     * peut déplacer que les opérations de rang <b>≥ k</b> : celles qui précèdent gardent le même
+     * prédécesseur, donc les mêmes dates. Les enfiler quand même les fait recalculer pour
+     * constater qu'elles n'ont pas bougé — mesuré à 36,5 % du travail de propagation
+     * (`REQ-KKI-043`), et amplifié par les ressources rares : 76 mises en train par metteur et 64
+     * emprunts par outillage, contre 18 opérations par machine.
+     *
+     * <p>
+     * {@code MAX_VALUE} vaut « je ne sais pas » et fait retomber sur l'enfilage INTÉGRAL. Un
+     * chemin qui toucherait une ressource sans passer par une insertion ni un retrait resterait
+     * donc correct, au prix de l'ancien coût — jamais faux.
+     */
+    private int[] touchedFromMachine;
+    private int[] touchedFromSetter;
+    private int[] touchedFromTooling;
     private int[] touchedMachines;
     private boolean[] machineTouched;
     private int touchedMachineCount;
@@ -171,6 +191,12 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         setterTouched = new boolean[setterCount];
         touchedToolings = new int[toolingCount];
         toolingTouched = new boolean[toolingCount];
+        touchedFromMachine = new int[machineCount];
+        touchedFromSetter = new int[setterCount];
+        touchedFromTooling = new int[toolingCount];
+        Arrays.fill(touchedFromMachine, Integer.MAX_VALUE);
+        Arrays.fill(touchedFromSetter, Integer.MAX_VALUE);
+        Arrays.fill(touchedFromTooling, Integer.MAX_VALUE);
         orderDirty = new boolean[orderCount];
 
         buildChains(operations, orderCount);
@@ -345,8 +371,40 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         }
     }
 
-    private void insertSorted(List<Operation> queue, Operation op) {
-        int key = rank[(int) op.getId()];
+    private int insertSorted(List<Operation> queue, Operation op) {
+        int position = positionOfRank(queue, rank[(int) op.getId()]);
+        queue.add(position, op);
+        return position;
+    }
+
+    /**
+     * Retire une opération de sa file et rend la position qu'elle occupait.
+     *
+     * <p>
+     * {@code List.remove(Object)} balaie la liste depuis le début pour retrouver l'élément. Les
+     * files sont triées par rang et le rang est unique — {@code position * RANK_STRIDE + passe},
+     * et deux opérations ne partagent jamais le couple —, donc la position se trouve par
+     * dichotomie. Sur une file de metteur de 76 mises en train, c'est 7 comparaisons au lieu de
+     * 38 en moyenne.
+     */
+    private int removeSorted(List<Operation> queue, Operation op) {
+        int position = positionOfRank(queue, rank[(int) op.getId()]);
+        if (position < queue.size() && queue.get(position) == op) {
+            queue.remove(position);
+            return position;
+        }
+        // Repli : la file n'est pas dans l'ordre attendu pour cette opération. Retirer par
+        // balayage reste correct — c'est le comportement d'origine — plutôt que de laisser une
+        // opération fantôme dans la file, qui fausserait toutes les dates en aval.
+        int fallback = queue.indexOf(op);
+        if (fallback >= 0) {
+            queue.remove(fallback);
+        }
+        return fallback >= 0 ? fallback : 0;
+    }
+
+    /** Première position dont le rang est ≥ {@code key}, par dichotomie sur une file triée. */
+    private int positionOfRank(List<Operation> queue, int key) {
         int low = 0;
         int high = queue.size();
         while (low < high) {
@@ -357,7 +415,7 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                 high = mid;
             }
         }
-        queue.add(low, op);
+        return low;
     }
 
     /**
@@ -1129,12 +1187,10 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             return;
         }
         PROPAGATIONS.incrementAndGet();
-        operationsByMachine[previous].remove(op);
+        touchMachine(previous, removeSorted(operationsByMachine[previous], op));
         op.setMachine(target);
         assignedMachineId[opId] = next;
-        insertSorted(operationsByMachine[next], op);
-        touchMachine(previous);
-        touchMachine(next);
+        touchMachine(next, insertSorted(operationsByMachine[next], op));
         flushTouched();
         propagate();
     }
@@ -1156,12 +1212,10 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             return;
         }
         PROPAGATIONS.incrementAndGet();
-        setupsBySetter[previous].remove(op);
+        touchSetter(previous, removeSorted(setupsBySetter[previous], op));
         op.setSetter(target);
         assignedSetterId[opId] = next;
-        insertSorted(setupsBySetter[next], op);
-        touchSetter(previous);
-        touchSetter(next);
+        touchSetter(next, insertSorted(setupsBySetter[next], op));
         flushTouched();
         propagate();
     }
@@ -1193,12 +1247,10 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             return;
         }
         PROPAGATIONS.incrementAndGet();
-        setupsByTooling[previous].remove(op);
+        touchTooling(previous, removeSorted(setupsByTooling[previous], op));
         op.setTooling(target);
         assignedToolingId[opId] = next;
-        insertSorted(setupsByTooling[next], op);
-        touchTooling(previous);
-        touchTooling(next);
+        touchTooling(next, insertSorted(setupsByTooling[next], op));
         flushTouched();
         propagate();
     }
@@ -1232,13 +1284,13 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         // Retirer AVANT de changer le rang : les files sont triées sur l'ancien rang.
         for (int k = 0; k < movedCount; k++) {
             for (int opId = firstOpIdOf(movedOrders[k]); opId >= 0; opId = chainSuccessorId[opId]) {
-                operationsByMachine[assignedMachineId[opId]].remove(opById[opId]);
-                setupsBySetter[assignedSetterId[opId]].remove(opById[opId]);
-                touchMachine(assignedMachineId[opId]);
-                touchSetter(assignedSetterId[opId]);
+                touchMachine(assignedMachineId[opId],
+                        removeSorted(operationsByMachine[assignedMachineId[opId]], opById[opId]));
+                touchSetter(assignedSetterId[opId],
+                        removeSorted(setupsBySetter[assignedSetterId[opId]], opById[opId]));
                 if (assignedToolingId[opId] >= 0) {
-                    setupsByTooling[assignedToolingId[opId]].remove(opById[opId]);
-                    touchTooling(assignedToolingId[opId]);
+                    touchTooling(assignedToolingId[opId],
+                            removeSorted(setupsByTooling[assignedToolingId[opId]], opById[opId]));
                 }
             }
         }
@@ -1249,10 +1301,13 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             int position = xPosition[(int) movedOrders[k].getId()];
             for (int opId = firstOpIdOf(movedOrders[k]); opId >= 0; opId = chainSuccessorId[opId]) {
                 rank[opId] = position * RANK_STRIDE + opById[opId].getPassIndex();
-                insertSorted(operationsByMachine[assignedMachineId[opId]], opById[opId]);
-                insertSorted(setupsBySetter[assignedSetterId[opId]], opById[opId]);
+                touchMachine(assignedMachineId[opId],
+                        insertSorted(operationsByMachine[assignedMachineId[opId]], opById[opId]));
+                touchSetter(assignedSetterId[opId],
+                        insertSorted(setupsBySetter[assignedSetterId[opId]], opById[opId]));
                 if (assignedToolingId[opId] >= 0) {
-                    insertSorted(setupsByTooling[assignedToolingId[opId]], opById[opId]);
+                    touchTooling(assignedToolingId[opId],
+                            insertSorted(setupsByTooling[assignedToolingId[opId]], opById[opId]));
                 }
             }
         }
@@ -1260,55 +1315,75 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
         propagate();
     }
 
-    private void touchMachine(int machine) {
+    private void touchMachine(int machine, int fromIndex) {
         if (!machineTouched[machine]) {
             machineTouched[machine] = true;
             touchedMachines[touchedMachineCount++] = machine;
         }
+        touchedFromMachine[machine] = Math.min(touchedFromMachine[machine], fromIndex);
     }
 
-    private void touchSetter(int setter) {
+    private void touchSetter(int setter, int fromIndex) {
         if (!setterTouched[setter]) {
             setterTouched[setter] = true;
             touchedSetters[touchedSetterCount++] = setter;
         }
+        touchedFromSetter[setter] = Math.min(touchedFromSetter[setter], fromIndex);
     }
 
-    private void touchTooling(int tooling) {
-        if (tooling >= 0 && !toolingTouched[tooling]) {
+    private void touchTooling(int tooling, int fromIndex) {
+        if (tooling < 0) {
+            return;
+        }
+        if (!toolingTouched[tooling]) {
             toolingTouched[tooling] = true;
             touchedToolings[touchedToolingCount++] = tooling;
         }
+        touchedFromTooling[tooling] = Math.min(touchedFromTooling[tooling], fromIndex);
     }
 
+    /**
+     * Reconstruit les chaînages des ressources touchées et enfile ce qui peut avoir bougé.
+     *
+     * <p>
+     * Le chaînage se refait INTÉGRALEMENT : {@code relink*} réécrit les liens précédent/suivant,
+     * et l'opération qui précède le point d'insertion voit bien son successeur changer. Mais sa
+     * DATE, elle, ne dépend que de son prédécesseur — inchangé — donc elle n'a pas à être
+     * recalculée. C'est toute la différence entre les deux boucles.
+     */
     private void flushTouched() {
         for (int t = 0; t < touchedMachineCount; t++) {
             int m = touchedMachines[t];
             relinkMachine(operationsByMachine[m]);
-            for (Operation op : operationsByMachine[m]) {
-                enqueue((int) op.getId());
-            }
+            enqueueFrom(operationsByMachine[m], touchedFromMachine[m]);
             machineTouched[m] = false;
+            touchedFromMachine[m] = Integer.MAX_VALUE;
         }
         touchedMachineCount = 0;
         for (int t = 0; t < touchedSetterCount; t++) {
             int s = touchedSetters[t];
             relinkSetter(setupsBySetter[s]);
-            for (Operation op : setupsBySetter[s]) {
-                enqueue((int) op.getId());
-            }
+            enqueueFrom(setupsBySetter[s], touchedFromSetter[s]);
             setterTouched[s] = false;
+            touchedFromSetter[s] = Integer.MAX_VALUE;
         }
         touchedSetterCount = 0;
         for (int t = 0; t < touchedToolingCount; t++) {
             int tool = touchedToolings[t];
             relinkTooling(setupsByTooling[tool]);
-            for (Operation op : setupsByTooling[tool]) {
-                enqueue((int) op.getId());
-            }
+            enqueueFrom(setupsByTooling[tool], touchedFromTooling[tool]);
             toolingTouched[tool] = false;
+            touchedFromTooling[tool] = Integer.MAX_VALUE;
         }
         touchedToolingCount = 0;
+    }
+
+    /** Enfile la file à partir de {@code from}, ou en entier si la position est inconnue. */
+    private void enqueueFrom(List<Operation> queue, int from) {
+        int start = from == Integer.MAX_VALUE ? 0 : Math.max(0, from);
+        for (int i = start; i < queue.size(); i++) {
+            enqueue((int) queue.get(i).getId());
+        }
     }
 
     private void propagate() {
