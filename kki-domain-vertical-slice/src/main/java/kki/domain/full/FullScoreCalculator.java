@@ -86,6 +86,8 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
     private long[] machineHourlyCents;
     private WorkCalendar[] machineCalendar;
     private WorkCalendar[] setterCalendar;
+    /** Les metteurs, pour tirer un candidat compétent sans repasser par la solution. */
+    private List<Setter> setterList;
 
     private int[] prevOnMachineId;
     private int[] nextOnMachineId;
@@ -208,6 +210,7 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
             machineCalendar[(int) machine.getId()] = machine.getCalendar();
         }
         setterCalendar = new WorkCalendar[setterCount];
+        setterList = workingSolution.getSetterList();
         for (Setter setter : workingSolution.getSetterList()) {
             setterCalendar[(int) setter.getId()] = setter.getCalendar();
         }
@@ -1065,6 +1068,137 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
      * @param target    poste compatible moins chargé
      */
     public record Reassignment(Operation operation, Machine target) {
+    }
+
+    /**
+     * Une réaffectation de METTEUR candidate — mouvement (6) de {@code CPT-KKI-010}.
+     *
+     * @param operation mise en train prise sur un metteur chargé
+     * @param target    metteur COMPÉTENT pour cette machine, et moins chargé
+     */
+    public record SetterReassignment(Operation operation, Setter target) {
+    }
+
+    /** Un échange d'exemplaire d'OUTILLAGE — mouvement (7) de {@code CPT-KKI-010}. */
+    public record ToolingReassignment(Operation operation, Tooling target) {
+    }
+
+    /**
+     * Tire une réaffectation de metteur qui a une chance de soulager le goulot.
+     *
+     * <p>
+     * <b>Pourquoi ce mouvement compte ici.</b> Le metteur est la ressource RARE du modèle : 242
+     * metteurs portent 18 486 mises en train, soit ~76 chacun, là où 1000 machines n'en portent
+     * que ~18. Un metteur saturé bloque des machines qui, elles, sont libres — et
+     * {@code CPT-KKI-007} fait payer ces heures machine perdues au coût horaire du poste.
+     *
+     * <p>
+     * <b>La compétence est un MUR, pas un surcoût.</b> Contrairement à la technologie machine,
+     * qui se substitue vers le haut, un metteur qui ne sait pas régler cette machine ne le fera
+     * jamais. Le tirage ne propose donc que des metteurs compétents — et il ne s'agit pas d'un
+     * filtre appliqué après coup : proposer l'incompétent ferait lever {@code reassignSetter}.
+     *
+     * <p>
+     * <b>Proxy de charge : le nombre de mises en train de la file.</b> Le span (comme pour les
+     * machines) ne convient pas ici — un metteur qui règle tard n'est pas forcément chargé, il
+     * peut n'avoir qu'une mise en train, placée loin. C'est le VOLUME qui sature un metteur.
+     */
+    public SetterReassignment sampleOverloadedSetterReassignment(Random random) {
+        int setterCount = setupsBySetter.length;
+        int busiest = -1;
+        int busiestLoad = -1;
+        for (int probe = 0; probe < 6; probe++) {
+            int candidate = random.nextInt(setterCount);
+            int size = setupsBySetter[candidate].size();
+            if (size > busiestLoad) {
+                busiestLoad = size;
+                busiest = candidate;
+            }
+        }
+        if (busiest < 0 || setupsBySetter[busiest].isEmpty()) {
+            return null;
+        }
+        List<Operation> queue = setupsBySetter[busiest];
+        Operation op = queue.get(random.nextInt(queue.size()));
+        if (op.getOrder().getFreezeLevel() == Order.FreezeLevel.HARD) {
+            return null;
+        }
+
+        Setter best = null;
+        int bestLoad = Integer.MAX_VALUE;
+        for (int probe = 0; probe < 6; probe++) {
+            Setter candidate = setterList.get(random.nextInt(setterList.size()));
+            int candidateId = (int) candidate.getId();
+            if (candidateId == busiest || !candidate.canSetUp(op.getMachine())) {
+                continue;
+            }
+            int load = setupsBySetter[candidateId].size();
+            if (load < bestLoad) {
+                bestLoad = load;
+                best = candidate;
+            }
+        }
+        // Un mouvement vers un metteur PLUS chargé n'est pas un rééquilibrage : le laisser
+        // passer dépenserait le budget en évaluations dont on sait déjà qu'elles échouent.
+        return best != null && bestLoad < busiestLoad ? new SetterReassignment(op, best) : null;
+    }
+
+    /**
+     * Tire un échange d'exemplaire d'outillage — mouvement (7) de {@code CPT-KKI-010}.
+     *
+     * <p>
+     * L'outillage est la ressource la PLUS rare : 120 exemplaires pour 7 710 emprunts, ~64
+     * chacun. Deux exemplaires du même type sont interchangeables ({@code CPT-KKI-009}), donc
+     * déplacer une mise en train d'un exemplaire saturé vers un exemplaire libre du même type ne
+     * change rien au plan sinon l'attente — c'est un gain sans contrepartie quand il existe.
+     *
+     * <p>
+     * L'exemplaire redevient libre à la FIN de la mise en train, pas à la fin de l'usinage : la
+     * file d'un outillage est donc plus courte que celle d'une machine à charge égale, et la
+     * contention s'y voit d'autant mieux.
+     */
+    public ToolingReassignment sampleContendedToolingReassignment(Random random) {
+        int toolingCount = setupsByTooling.length;
+        int busiest = -1;
+        int busiestLoad = -1;
+        for (int probe = 0; probe < 6; probe++) {
+            int candidate = random.nextInt(toolingCount);
+            int size = setupsByTooling[candidate].size();
+            if (size > busiestLoad) {
+                busiestLoad = size;
+                busiest = candidate;
+            }
+        }
+        if (busiest < 0 || setupsByTooling[busiest].isEmpty()) {
+            return null;
+        }
+        List<Operation> queue = setupsByTooling[busiest];
+        Operation op = queue.get(random.nextInt(queue.size()));
+        if (op.getOrder().getFreezeLevel() == Order.FreezeLevel.HARD) {
+            return null;
+        }
+
+        // Les exemplaires compatibles sont ceux du TYPE exigé, mémoïsés à la génération : la
+        // liste est partagée par toutes les opérations qui exigent ce type.
+        List<Tooling> candidates = op.getCompatibleToolings();
+        if (candidates == null || candidates.size() < 2) {
+            return null;
+        }
+        Tooling best = null;
+        int bestLoad = Integer.MAX_VALUE;
+        for (int probe = 0; probe < 6; probe++) {
+            Tooling candidate = candidates.get(random.nextInt(candidates.size()));
+            int candidateId = (int) candidate.getId();
+            if (candidateId == busiest) {
+                continue;
+            }
+            int load = setupsByTooling[candidateId].size();
+            if (load < bestLoad) {
+                bestLoad = load;
+                best = candidate;
+            }
+        }
+        return best != null && bestLoad < busiestLoad ? new ToolingReassignment(op, best) : null;
     }
 
     /**

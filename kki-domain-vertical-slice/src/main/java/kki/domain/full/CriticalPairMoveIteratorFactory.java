@@ -72,10 +72,39 @@ public final class CriticalPairMoveIteratorFactory
         this.reassignmentShare = Double.parseDouble(reassignmentShare);
     }
 
+    /**
+     * Part des tirages consacrée aux mouvements (6) et (7) de {@code CPT-KKI-010} — réaffectation
+     * du METTEUR et échange d'exemplaire d'OUTILLAGE.
+     *
+     * <p>
+     * Ces deux ressources sont les plus rares du modèle : 242 metteurs portent ~76 mises en train
+     * chacun et 120 exemplaires d'outillage ~64 emprunts, là où 1000 machines n'en portent que
+     * ~18. Elles étaient jusqu'ici hors de la boucle de recherche — leurs primitives existaient
+     * mais aucun {@code Move} ne les tirait.
+     *
+     * <p>
+     * Zéro par défaut : cette part est une dimension du banc au sens de {@code DEC-KKI-005}, donc
+     * à balayer et jamais à deviner. Le défaut nul garantit surtout que les mesures antérieures
+     * restent rejouables à l'identique — un nouveau mouvement activé par défaut rendrait toute
+     * comparaison avec l'existant impossible.
+     */
+    private double scarceResourceShare = 0.0;
+
+    public void setScarceResourceShare(String scarceResourceShare) {
+        this.scarceResourceShare = Double.parseDouble(scarceResourceShare);
+    }
+
     /** Comptés pour que la mesure puisse dire si les DEUX mouvements sont réellement tirés. */
     public static final java.util.concurrent.atomic.AtomicLong SWAPS_EMITTED =
             new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong REASSIGNMENTS_EMITTED =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Idem pour les ressources rares : un mouvement câblé mais jamais émis se lit comme exercé. */
+    public static final java.util.concurrent.atomic.AtomicLong SETTER_MOVES_EMITTED =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    public static final java.util.concurrent.atomic.AtomicLong TOOLING_MOVES_EMITTED =
             new java.util.concurrent.atomic.AtomicLong();
 
     @Override
@@ -106,6 +135,17 @@ public final class CriticalPairMoveIteratorFactory
 
             @Override
             public Move<JobShopSolution> next() {
+                // Les ressources RARES d'abord : leur part est prélevée sur le tirage entier, de
+                // sorte que `scarceResourceShare=0` redonne EXACTEMENT le comportement mesuré
+                // jusqu'ici — condition pour que les campagnes antérieures restent comparables.
+                if (scarceResourceShare > 0.0 && workingRandom.nextDouble() < scarceResourceShare) {
+                    Move<JobShopSolution> scarce = nextScarceResource(workingRandom);
+                    if (scarce != null) {
+                        return scarce;
+                    }
+                    // Repli assumé sur les autres mouvements, comme partout ailleurs ici : un
+                    // itérateur qui se tarit se lirait comme une convergence.
+                }
                 // Le calculateur du directeur QUI NOUS A CRÉÉS, résolu une fois à la
                 // construction de l'itérateur. Le champ statique qui vivait ici désignait un
                 // directeur quelconque dès que le moteur en tient plusieurs (FULL_ASSERT,
@@ -121,6 +161,38 @@ public final class CriticalPairMoveIteratorFactory
                 }
                 SWAPS_EMITTED.incrementAndGet();
                 return nextSwap(live, workingRandom);
+            }
+
+            /**
+             * Tire l'un des deux mouvements de ressource rare, à pile ou face.
+             *
+             * <p>
+             * Un tirage équitable entre metteur et outillage plutôt qu'une seconde part à
+             * régler : rien ne permet aujourd'hui de dire laquelle des deux ressources paie le
+             * plus, et introduire un paramètre non mesuré serait exactement ce que
+             * {@code DEC-KKI-005} proscrit. Si le balayage montre un écart, il deviendra une
+             * dimension du banc à part entière.
+             */
+            private Move<JobShopSolution> nextScarceResource(Random random) {
+                FullScoreCalculator live = calculator;
+                if (random.nextBoolean()) {
+                    FullScoreCalculator.SetterReassignment candidate =
+                            live.sampleOverloadedSetterReassignment(random);
+                    if (candidate != null) {
+                        SETTER_MOVES_EMITTED.incrementAndGet();
+                        return new SetterReassignmentMove(schedule, candidate.operation(),
+                                candidate.target());
+                    }
+                    return null;
+                }
+                FullScoreCalculator.ToolingReassignment candidate =
+                        live.sampleContendedToolingReassignment(random);
+                if (candidate != null) {
+                    TOOLING_MOVES_EMITTED.incrementAndGet();
+                    return new ToolingReassignmentMove(schedule, candidate.operation(),
+                            candidate.target());
+                }
+                return null;
             }
 
             private Move<JobShopSolution> nextReassignment(FullScoreCalculator live,

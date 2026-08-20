@@ -170,6 +170,8 @@ public final class FullRunner {
 
         CriticalPairMoveIteratorFactory.SWAPS_EMITTED.set(0L);
         CriticalPairMoveIteratorFactory.REASSIGNMENTS_EMITTED.set(0L);
+        CriticalPairMoveIteratorFactory.SETTER_MOVES_EMITTED.set(0L);
+        CriticalPairMoveIteratorFactory.TOOLING_MOVES_EMITTED.set(0L);
         FullScoreCalculator.CALCULATE_SCORE_CALLS.set(0L);
         FullScoreCalculator.DIRTY_OPERATIONS.set(0L);
         FullScoreCalculator.ORDER_COMPLETION_CHANGES.set(0L);
@@ -244,10 +246,13 @@ public final class FullRunner {
         }
         // Les DEUX mouvements sont-ils réellement tirés ? Sans ce compte, un second mouvement
         // câblé mais jamais émis se lirait comme un second mouvement exercé.
-        System.out.printf("moves_emitted swaps=%d reassignments=%d reassignment_share=%.2f%n",
+        System.out.printf("moves_emitted swaps=%d reassignments=%d setters=%d toolings=%d"
+                + " reassignment_share=%.2f scarce_share=%.2f%n",
                 CriticalPairMoveIteratorFactory.SWAPS_EMITTED.get(),
                 CriticalPairMoveIteratorFactory.REASSIGNMENTS_EMITTED.get(),
-                variant == Variant.M5 ? reassignmentShare : 0.0);
+                CriticalPairMoveIteratorFactory.SETTER_MOVES_EMITTED.get(),
+                CriticalPairMoveIteratorFactory.TOOLING_MOVES_EMITTED.get(),
+                variant == Variant.M5 ? reassignmentShare : 0.0, scarceResourceShare);
     }
 
     /**
@@ -326,9 +331,23 @@ public final class FullRunner {
         config.setMoveIteratorFactoryClass(CriticalPairMoveIteratorFactory.class);
         config.setMoveIteratorFactoryCustomProperties(Map.of(
                 "guided", Boolean.toString(guided),
-                "reassignmentShare", Double.toString(reassignmentShare)));
+                "reassignmentShare", Double.toString(reassignmentShare),
+                "scarceResourceShare", Double.toString(scarceResourceShare)));
         return config;
     }
+
+    /**
+     * Part des tirages donnée aux mouvements (6) metteur et (7) outillage de {@code CPT-KKI-010},
+     * réglable par {@code -Dkki.scarceShare=…}.
+     *
+     * <p>
+     * Zéro par défaut, et c'est délibéré : activer un nouveau mouvement par défaut rendrait toute
+     * comparaison avec les campagnes antérieures impossible. La valeur se mesure avant de servir
+     * de défaut — c'est la leçon du défaut périmé corrigé en {@code f7250188} et celle de
+     * {@code reassignmentShare}, dont le 0,5 n'avait jamais été mesuré.
+     */
+    public static double scarceResourceShare =
+            Double.parseDouble(System.getProperty("kki.scarceShare", "0.0"));
 
     /**
      * Impose l'ordre de départ demandé. {@link Start#GEN} ne trie pas : c'est l'ordre dans
