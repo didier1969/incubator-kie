@@ -1,5 +1,7 @@
 package kki.domain.full;
 
+import org.optaplanner.core.api.domain.lookup.PlanningId;
+
 /**
  * Un exemplaire d'outillage du pool partagé — troisième ressource consommée par une mise en
  * train, après la machine et le metteur.
@@ -25,6 +27,7 @@ package kki.domain.full;
  */
 public final class Tooling {
 
+    @PlanningId
     private final long id;
     private final int type;
 

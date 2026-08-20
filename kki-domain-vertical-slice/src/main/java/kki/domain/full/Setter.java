@@ -1,5 +1,7 @@
 package kki.domain.full;
 
+import org.optaplanner.core.api.domain.lookup.PlanningId;
+
 /**
  * Metteur en train — une ressource comme une autre, avec son calendrier propre et ses
  * compétences.
@@ -27,6 +29,7 @@ package kki.domain.full;
  */
 public final class Setter {
 
+    @PlanningId
     private final long id;
     private final WorkCalendar calendar;
     /** Technologies que ce metteur sait régler, indexées par numéro de technologie. */

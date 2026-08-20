@@ -2,6 +2,8 @@ package kki.domain.full;
 
 import java.util.List;
 
+import org.optaplanner.core.api.domain.lookup.PlanningId;
+
 /**
  * Un passage d'un ordre sur une ressource.
  *
@@ -33,6 +35,7 @@ public class Operation {
     /** Valeur de {@link #requiredToolingType} quand la mise en train n'emprunte aucun outillage. */
     public static final int NO_TOOLING = -1;
 
+    @PlanningId
     private long id;
     private Order order;
     private int passIndex;

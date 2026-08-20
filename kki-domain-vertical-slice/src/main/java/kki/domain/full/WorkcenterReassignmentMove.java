@@ -6,6 +6,7 @@ import java.util.List;
 
 import org.optaplanner.core.api.score.director.ScoreDirector;
 import org.optaplanner.core.impl.heuristic.move.AbstractMove;
+import org.optaplanner.core.impl.heuristic.move.Move;
 import org.optaplanner.core.impl.score.director.incremental.IncrementalScoreDirector;
 
 /**
@@ -96,6 +97,26 @@ public final class WorkcenterReassignmentMove extends AbstractMove<JobShopSoluti
                     "ce mouvement exige un directeur de score incrémental, reçu " + scoreDirector);
         }
         return (FullScoreCalculator) incremental.getIncrementalScoreCalculator();
+    }
+
+    /**
+     * Traduit ce mouvement pour la solution d'un AUTRE fil de résolution.
+     *
+     * <p>
+     * Les trois références se traduisent : le {@link Schedule}, l'{@link Operation} déplacée, et
+     * le poste cible. Chacune est retrouvée par son {@code @PlanningId} — jamais par l'état d'une
+     * variable, que le contrat de {@code rebase} interdit de lire ici : un autre fil peut être en
+     * train de modifier cet état pendant la traduction.
+     *
+     * <p>
+     * Le poste cible est un fait du problème et n'est pas cloné entre les fils ; le traduire quand
+     * même est sans effet dans ce cas, et reste juste si la solution venait à cloner ses machines.
+     */
+    @Override
+    public Move<JobShopSolution> rebase(ScoreDirector<JobShopSolution> destinationScoreDirector) {
+        return new WorkcenterReassignmentMove(destinationScoreDirector.lookUpWorkingObject(schedule),
+                destinationScoreDirector.lookUpWorkingObject(operation),
+                destinationScoreDirector.lookUpWorkingObject(target));
     }
 
     /**

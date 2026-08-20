@@ -1,5 +1,7 @@
 package kki.domain.full;
 
+import org.optaplanner.core.api.domain.lookup.PlanningId;
+
 /**
  * CPT-KKI-008 — ressource, avec sa position sur l'échelle de compatibilité ascendante.
  *
@@ -12,6 +14,7 @@ package kki.domain.full;
  */
 public final class Machine {
 
+    @PlanningId
     private final long id;
     private final int technology;
     private final int level;

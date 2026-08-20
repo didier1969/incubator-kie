@@ -6,6 +6,7 @@ import java.util.List;
 
 import org.optaplanner.core.api.score.director.ScoreDirector;
 import org.optaplanner.core.impl.heuristic.move.AbstractMove;
+import org.optaplanner.core.impl.heuristic.move.Move;
 
 /**
  * M3 — échange les positions X de deux ordres.
@@ -58,6 +59,27 @@ public final class CriticalPairSwapMove extends AbstractMove<JobShopSolution> {
         scoreDirector.beforeListVariableChanged(schedule, "orderSequence", leftIndex, rightIndex + 1);
         Collections.swap(sequence, leftIndex, rightIndex);
         scoreDirector.afterListVariableChanged(schedule, "orderSequence", leftIndex, rightIndex + 1);
+    }
+
+    /**
+     * Traduit ce mouvement pour la solution d'un AUTRE fil de résolution.
+     *
+     * <p>
+     * En multi-thread chaque fil détient sa propre copie de la solution. Un mouvement construit
+     * sur la copie A doit donc désigner le {@link Schedule} de la copie B avant d'y être appliqué,
+     * sans quoi il modifie un objet qui n'appartient pas au fil qui l'évalue — c'est le même
+     * défaut que le champ statique supprimé en {@code e5724217}, à l'échelle des fils.
+     *
+     * <p>
+     * Les deux positions sont des ENTIERS : elles ne se traduisent pas, elles désignent le même
+     * rang dans une liste de même contenu. Seul le Schedule doit l'être. C'est ce qui rend cette
+     * traduction sûre alors que le contrat interdit de dépendre de l'ÉTAT des variables : on ne
+     * lit ici aucune valeur de la liste.
+     */
+    @Override
+    public Move<JobShopSolution> rebase(ScoreDirector<JobShopSolution> destinationScoreDirector) {
+        return new CriticalPairSwapMove(destinationScoreDirector.lookUpWorkingObject(schedule),
+                leftIndex, rightIndex);
     }
 
     @Override

@@ -152,6 +152,14 @@ public final class FullRunner {
         //
         // Jamais le mode de MESURE : le recalcul complet coûte des ordres de grandeur. Une passe
         // dédiée, sur une instance réduite, et le verdict est binaire — vert ou une trace.
+        // Résolution multi-thread, activée par -Dkki.threads=N. Le moteur exige alors que chaque
+        // Move sache se traduire dans la copie de solution du fil destinataire (`Move.rebase`) ;
+        // sans cela il refuse de démarrer, explicitement.
+        String threads = System.getProperty("kki.threads");
+        if (threads != null) {
+            solverConfig.setMoveThreadCount(threads);
+            System.out.printf("move_thread_count %s%n", threads);
+        }
         String assertMode = System.getProperty("kki.assert");
         if (assertMode != null) {
             solverConfig.setEnvironmentMode(

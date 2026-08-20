@@ -68,6 +68,11 @@ public final class JobShopSolutionCloner implements SolutionCloner<JobShopSoluti
             clonedSequence.add(clonedByOriginal.get(order));
         }
         Schedule clonedSchedule = new Schedule();
+        // L'identité se REPORTE, elle ne se redevine pas : c'est par elle que
+        // `lookUpWorkingObject` retrouve ce Schedule depuis une autre copie de la solution,
+        // donc par elle que `Move.rebase` fonctionne. Compter sur le zéro par défaut marcherait
+        // tant qu'il n'y a qu'un Schedule — c'est-à-dire jusqu'au jour où il y en aura deux.
+        clonedSchedule.setId(originalSchedule.getId());
         clonedSchedule.setOrderSequence(clonedSequence);
 
         JobShopSolution clone = new JobShopSolution(clonedOrders, clonedOperations,

@@ -2,6 +2,8 @@ package kki.domain.full;
 
 import java.util.List;
 
+import org.optaplanner.core.api.domain.lookup.PlanningId;
+
 /**
  * Un ordre : une chaîne séquentielle de 1 à 6 opérations pour un article, avec sa date due,
  * son poids de priorité et son palier de gel.
@@ -23,6 +25,7 @@ public final class Order {
         HARD, SOFT, FREE
     }
 
+    @PlanningId
     private final long id;
     private final int articleId;
     private final int priorityWeight;

@@ -3,6 +3,7 @@ package kki.domain.full;
 import java.util.List;
 
 import org.optaplanner.core.api.domain.entity.PlanningEntity;
+import org.optaplanner.core.api.domain.lookup.PlanningId;
 import org.optaplanner.core.api.domain.variable.PlanningListVariable;
 
 /**
@@ -21,8 +22,25 @@ import org.optaplanner.core.api.domain.variable.PlanningListVariable;
 @PlanningEntity
 public class Schedule {
 
+    /**
+     * Identité stable, exigée par {@code ScoreDirector.lookUpWorkingObject} — donc par
+     * {@code Move.rebase}, donc par la résolution multi-thread. La solution ne porte qu'UN
+     * Schedule, mais chaque fil de résolution en a sa propre COPIE : sans identifiant, un
+     * mouvement ne sait pas désigner le Schedule de la copie destinataire.
+     */
+    @PlanningId
+    private long id;
+
     @PlanningListVariable(valueRangeProviderRefs = "orderRange")
     private List<Order> orderSequence;
+
+    public long getId() {
+        return id;
+    }
+
+    public void setId(long id) {
+        this.id = id;
+    }
 
     public List<Order> getOrderSequence() {
         return orderSequence;
