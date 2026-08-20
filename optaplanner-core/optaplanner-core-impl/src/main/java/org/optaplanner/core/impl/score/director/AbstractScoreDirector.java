@@ -674,16 +674,30 @@ public abstract class AbstractScoreDirector<Solution_, Score_ extends Score<Scor
             // Precondition: assert that shadow variables aren't stale after doing the undoMove
             assertShadowVariablesAreNotStale(undoScore, undoMoveString);
             String scoreDifference = undoScore.subtract(beforeMoveScore).toShortString();
+            // The two asserts above have just proven the CURRENT score to be uncorrupted. So the
+            // corrupted score is the one taken BEFORE the move, and that state no longer exists:
+            // no corruption analysis can name the constraints responsible for it. Saying so
+            // explicitly is the single most useful thing this message can do - without it, the
+            // reader hunts a corruption in a state the solver has already left behind.
             throw new IllegalStateException("UndoMove corruption (" + scoreDifference
                     + "): the beforeMoveScore (" + beforeMoveScore + ") is not the undoScore (" + undoScore
                     + ") which is the uncorruptedScore (" + undoScore + ") of the workingSolution.\n"
+                    + "  The undoScore has just been verified to be uncorrupted, so it is the"
+                    + " BEFORE-move score that was already wrong when the move was applied."
+                    + " That state is gone, so no score corruption analysis of it is possible here:"
+                    + " the corruption was introduced earlier than this point.\n"
                     + "  1) Enable EnvironmentMode " + EnvironmentMode.FULL_ASSERT
-                    + " (if you haven't already) to fail-faster in case there's a score corruption or variable listener corruption.\n"
-                    + "  2) Check the Move.createUndoMove(...) method of the moveClass (" + move.getClass() + ")."
-                    + " The move (" + move + ") might have a corrupted undoMove (" + undoMoveString + ").\n"
-                    + "  3) Check your custom " + VariableListener.class.getSimpleName() + "s (if you have any)"
+                    + " (if you haven't already) and let the solver run until it reaches this same"
+                    + " point again, however long that takes. It fails at the step that introduces"
+                    + " the corruption instead of the step that detects it.\n"
+                    + "  2) If you use custom moves, check the Move.createUndoMove(...) method of the"
+                    + " moveClass (" + move.getClass().getSimpleName() + ")."
+                    + " The move (" + move + ") might have a corrupted undoMove (" + undoMoveString + ")."
+                    + " If all your moves come from the solver itself, this point does not apply.\n"
+                    + "  3) If you use custom " + VariableListener.class.getSimpleName() + "s, check them"
                     + " for shadow variables that are used by score constraints that could cause"
-                    + " the scoreDifference (" + scoreDifference + ").");
+                    + " the scoreDifference (" + scoreDifference + ")."
+                    + " If you have none, this point does not apply either.");
         }
     }
 

@@ -145,6 +145,20 @@ public final class FullRunner {
         solverConfig.setEntityClassList(List.of(Schedule.class));
         solverConfig.setScoreDirectorFactoryConfig(scoreDirectorFactoryConfig);
         solverConfig.setPhaseConfigList(phasesOf(variant, seconds));
+        // Le détecteur de corruption DU MOTEUR, activé par -Dkki.assert=FULL_ASSERT. Il compare
+        // le score incrémental à un recalcul complet APRÈS CHAQUE MOUVEMENT : c'est exactement
+        // la classe de défaut qui a produit `JobShopSolutionCloner` (score annoncé ≠ plan rendu),
+        // et il la trouve au mouvement qui l'introduit, pas des heures plus tard.
+        //
+        // Jamais le mode de MESURE : le recalcul complet coûte des ordres de grandeur. Une passe
+        // dédiée, sur une instance réduite, et le verdict est binaire — vert ou une trace.
+        String assertMode = System.getProperty("kki.assert");
+        if (assertMode != null) {
+            solverConfig.setEnvironmentMode(
+                    org.optaplanner.core.config.solver.EnvironmentMode.valueOf(assertMode));
+            System.out.printf("environment_mode %s — recalcul complet à chaque mouvement,"
+                    + " le débit mesuré ici ne vaut RIEN%n", assertMode);
+        }
 
         CriticalPairMoveIteratorFactory.SWAPS_EMITTED.set(0L);
         CriticalPairMoveIteratorFactory.REASSIGNMENTS_EMITTED.set(0L);
