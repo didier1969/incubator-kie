@@ -13,17 +13,19 @@ import org.optaplanner.core.config.solver.SolverConfig;
 import org.optaplanner.core.config.solver.termination.TerminationConfig;
 
 /**
- * Mesure sur le domaine COMPLET : débit et réduction de coût, à l'échelle réelle.
+ * Mesure sur le domaine COMPLET : coût atteint dans un budget de temps, à l'échelle réelle.
  *
  * <p>
- * Le seul mouvement configuré est le <b>swap de position X</b> (M1 de CPT-KKI-012). Ce n'est pas
- * une restriction de commodité : le concept autorise le swap, pas le relocate, et un relocate
- * décalerait toute la plage d'ordres entre les deux positions au lieu de deux ordres — ce qui
- * changerait la nature du mouvement mesuré.
+ * Le mouvement de position reste un <b>échange</b> et jamais un relocate : le concept autorise
+ * l'échange, et un relocate décalerait toute la plage d'ordres entre les deux positions au lieu
+ * de deux ordres — ce qui changerait la nature du mouvement mesuré. Depuis {@code REQ-KKI-031} la
+ * variante par défaut M5 y ajoute le SECOND mouvement du paradigme, la réaffectation de
+ * workcenter, tiré dans la même boucle.
  *
  * <pre>
- *   java ... kki.domain.full.FullRunner [ordres] [secondes] [variante] [skew] [jours] [part]
- *   défaut : 5000 60 M5
+ *   java ... kki.domain.full.FullRunner \
+ *       [ordres] [secondes] [variante] [skew] [jours] [part] [depart] [graine]
+ *   défaut : 5000 60 M5 2.0 5 0.5 EDD 42
  *
  *   # le classpath se régénère par :
  *   mvn -o dependency:build-classpath -Dmdep.outputFile=target/cp.txt
@@ -39,6 +41,17 @@ public final class FullRunner {
      * c'est une observation sur un tirage.
      */
     public static long seed = 42L;
+
+    /**
+     * Ordre de la séquence AVANT la recherche. Ce n'est pas un détail d'instance : toute
+     * réduction se mesure contre lui, donc il se choisit et se déclare (`REQ-KKI-032`).
+     */
+    public enum Start {
+        /** L'ordre dans lequel le carnet est tombé — aucun tri. */
+        GEN,
+        /** Plus urgent d'abord, par date due. Départ historique du banc. */
+        EDD
+    }
 
     /** Jeu de mouvements activé, pour décomposer le gain par incrément (A4). */
     public enum Variant {
@@ -70,13 +83,19 @@ public final class FullRunner {
         if (args.length > 3) {
             FullDataGenerator.levelDemandSkew = Double.parseDouble(args[3]);
         }
-        if (args.length > 5) {
-            reassignmentShare = Double.parseDouble(args[5]);
-        }
         if (args.length > 4) {
             // Pour isoler un effet d'un autre : deux changements dans un même commit ne se
             // départagent pas en relisant le diff, seulement en refaisant la mesure.
             FullDataGenerator.setterWorkingDays = Integer.parseInt(args[4]);
+        }
+        if (args.length > 5) {
+            reassignmentShare = Double.parseDouble(args[5]);
+        }
+        Start start = args.length > 6 ? Start.valueOf(args[6]) : Start.EDD;
+        if (args.length > 7) {
+            // Un verdict qui ne tient que sur une graine est une observation sur un tirage. La
+            // graine était un champ public jamais relié à argv : impossible de rejouer ailleurs.
+            seed = Long.parseLong(args[7]);
         }
 
         JobShopSolution problem = FullDataGenerator.generate(orderCount, seed);
@@ -87,20 +106,29 @@ public final class FullRunner {
                 problem.getToolingList().size(), FullDataGenerator.levelDemandSkew);
 
         FullScoreCalculator oracle = new FullScoreCalculator();
-        oracle.resetWorkingSolution(problem);
-        long randomOrderCost = -oracle.fullSweepScore().getSoftScore();
+        List<Order> sequence = problem.getScheduleList().get(0).getOrderSequence();
+        List<Order> generationOrder = List.copyOf(sequence);
 
-        // RÉFÉRENCE HONNÊTE : « plus urgent d'abord ». Mesurer une réduction contre un ordre de
-        // génération aléatoire flatterait le solveur d'un gain qu'un planificateur obtient à la
-        // main en triant sa liste. C'est contre CETTE référence que la valeur se juge.
-        problem.getScheduleList().get(0).getOrderSequence()
-                .sort(Comparator.comparingLong(Order::getDueEpochSec));
+        // Les DEUX départs sont chiffrés à chaque run, quel que soit celui qui sert : sans les
+        // deux, la réduction annoncée ne dit pas contre quoi elle est prise.
+        long generationOrderCost = softCostOf(oracle, problem);
+        applyStart(problem, Start.EDD);
+        long earliestDueDateCost = softCostOf(oracle, problem);
+        if (start == Start.GEN) {
+            sequence.clear();
+            sequence.addAll(generationOrder);
+        }
         oracle.resetWorkingSolution(problem);
         long startCost = -oracle.fullSweepScore().getSoftScore();
         long startHard = -oracle.fullSweepScore().getHardScore();
-        System.out.printf("full_baseline random_order_chf=%.0f earliest_due_date_chf=%.0f edd_gain_pct=%.2f%n",
-                randomOrderCost / 100.0, startCost / 100.0,
-                100.0 * (randomOrderCost - startCost) / (double) randomOrderCost);
+        // Le nom dit le SENS de la valeur. `edd_gain_pct` imprimait ≈ −440 % là où le tri par
+        // date due rend le plan 5,4 fois plus CHER (`REQ-KKI-030`) : un nom qui énonce le
+        // contraire de sa valeur est la même faute que le défaut périmé corrigé en f7250188.
+        System.out.printf("full_baseline start=%s seed=%d generation_order_chf=%.0f"
+                + " earliest_due_date_chf=%.0f edd_over_generation_x=%.2f%n",
+                start, seed, generationOrderCost / 100.0, earliestDueDateCost / 100.0,
+                generationOrderCost == 0L ? 0.0
+                        : earliestDueDateCost / (double) generationOrderCost);
         System.out.print(oracle.coldSweep().describe("depart"));
         System.out.print(oracle.backwardSweep().describe("depart", startCost));
         // La capacité se compte sur l'HORIZON DE PLANIFICATION et non sur le makespan : un
@@ -166,12 +194,13 @@ public final class FullRunner {
             verdict = "WORSE_BOTH";
         }
         System.out.printf(
-                "full_result variant=%s orders=%d seconds=%.2f moves_per_sec=%.1f propagations=%d "
+                "full_result variant=%s start=%s seed=%d orders=%d seconds=%.2f"
+                        + " moves_per_sec=%.1f propagations=%d "
                         + "start_cost_chf=%.0f end_cost_chf=%.0f soft_reduction_pct=%.2f "
                         + "hard_start=%d hard_end=%d hard_reduction_pct=%.2f verdict=%s "
                         + "dirty_per_propagation=%.1f order_changes_per_propagation=%.1f"
                         + " cost_relevant_pct=%.2f%n",
-                variant, orderCount, elapsed, calls / elapsed, propagations,
+                variant, start, seed, orderCount, elapsed, calls / elapsed, propagations,
                 startCost / 100.0, endCost / 100.0,
                 startCost == 0L ? 0.0 : 100.0 * (startCost - endCost) / (double) startCost,
                 startHard, endHard,
@@ -241,6 +270,23 @@ public final class FullRunner {
                 "guided", Boolean.toString(guided),
                 "reassignmentShare", Double.toString(reassignmentShare)));
         return config;
+    }
+
+    /**
+     * Impose l'ordre de départ demandé. {@link Start#GEN} ne trie pas : c'est l'ordre dans
+     * lequel le générateur a produit le carnet.
+     */
+    static void applyStart(JobShopSolution problem, Start start) {
+        if (start == Start.EDD) {
+            problem.getScheduleList().get(0).getOrderSequence()
+                    .sort(Comparator.comparingLong(Order::getDueEpochSec));
+        }
+    }
+
+    /** Coût souple de la séquence courante, calculateur réarmé — une balayée complète. */
+    private static long softCostOf(FullScoreCalculator oracle, JobShopSolution problem) {
+        oracle.resetWorkingSolution(problem);
+        return -oracle.fullSweepScore().getSoftScore();
     }
 
     /** Part du budget de tirage donnée au second mouvement. Dimension du banc, balayable. */
