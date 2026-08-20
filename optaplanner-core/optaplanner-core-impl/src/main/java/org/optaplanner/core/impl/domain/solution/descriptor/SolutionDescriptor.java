@@ -1061,7 +1061,11 @@ public class SolutionDescriptor<Solution_> {
     private int countUnassignedValues(Solution_ solution, ListVariableDescriptor<Solution_> variableDescriptor) {
         long totalValueCount = variableDescriptor.getValueCount(solution, null);
         MutableInt assignedValuesCount = new MutableInt();
-        visitAllEntities(solution,
+        // Only the entity class that DECLARES this list variable can be asked for its list size.
+        // Visiting every entity of every class and applying the list variable descriptor to each
+        // one throws as soon as a solution mixes an entity class with a list variable and another
+        // with a basic variable - a combination the domain model otherwise allows.
+        visitEntitiesByEntityClass(solution, variableDescriptor.getEntityDescriptor().getEntityClass(),
                 entity -> assignedValuesCount.add(variableDescriptor.getListSize(entity)));
         // TODO maybe detect duplicates and elements that are outside the value range
         return Math.toIntExact(totalValueCount - assignedValuesCount.intValue());
