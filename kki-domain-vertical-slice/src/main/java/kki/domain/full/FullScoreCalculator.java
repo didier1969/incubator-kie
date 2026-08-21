@@ -115,6 +115,8 @@ public final class FullScoreCalculator
      * file reste ce qu'elle est — l'ordre des opérations que le solveur, lui, décide.
      */
     private List<ResourceClaim>[] claimsOnMachine;
+    private List<ResourceClaim>[] claimsOnSetter;
+    private List<ResourceClaim>[] claimsOnTooling;
 
     private List<Operation>[] operationsByMachine;
     private List<Operation>[] setupsBySetter;
@@ -232,34 +234,12 @@ public final class FullScoreCalculator
             setterCalendar[(int) setter.getId()] = setter.getCalendar();
         }
 
-        claimsOnMachine = new List[machineCount];
-        for (int m = 0; m < machineCount; m++) {
-            claimsOnMachine[m] = List.of();
-        }
-        for (ResourceClaim claim : workingSolution.getClaimList()) {
-            int m = claim.getMachineId();
-            if (m == ResourceClaim.NONE) {
-                continue;
-            }
-            List<ResourceClaim> onMachine = claimsOnMachine[m];
-            if (onMachine.isEmpty()) {
-                onMachine = new ArrayList<>(2);
-                claimsOnMachine[m] = onMachine;
-            }
-            onMachine.add(claim);
-        }
-        for (List<ResourceClaim> onMachine : claimsOnMachine) {
-            // Le tri par début est ce qui autorise la sortie anticipée du clamp : dès qu'une
-            // revendication commence après la fin de l'opération, aucune des suivantes ne peut
-            // plus la croiser.
-            //
-            // Les machines sans revendication portent `List.of()`, immuable : la trier lèverait.
-            // Le cas est celui de 1000 machines sur 1000 dans la configuration par défaut, donc
-            // le garde n'est pas une précaution — c'est le chemin normal.
-            if (onMachine.size() > 1) {
-                onMachine.sort(Comparator.comparingLong(ResourceClaim::getMachineFromEpochSec));
-            }
-        }
+        claimsOnMachine = groupClaims(workingSolution.getClaimList(), machineCount,
+                ResourceClaim::getMachineId, ResourceClaim::getMachineFromEpochSec);
+        claimsOnSetter = groupClaims(workingSolution.getClaimList(), setterCount,
+                ResourceClaim::getSetterId, ResourceClaim::getSetterFromEpochSec);
+        claimsOnTooling = groupClaims(workingSolution.getClaimList(), toolingCount,
+                ResourceClaim::getToolingId, ResourceClaim::getToolingFromEpochSec);
 
         operationsByMachine = new List[machineCount];
         for (int m = 0; m < machineCount; m++) {
@@ -500,41 +480,69 @@ public final class FullScoreCalculator
         long start = Math.max(setupEnd, chainReadyAt);
         long end = machineCalendar[machineId].occupancyEnd(start, op.getDurationSeconds());
 
-        // ── BUTÉE, couche machine (DEC-KKI-013) ──────────────────────────────────────────────
+        // ── BUTÉE — les trois couches, jusqu'au point fixe (DEC-KKI-013) ────────────────────
         //
         // Rien ne traverse une revendication. Une opération dont la fenêtre la croiserait est
         // REPOUSSÉE derrière elle. Ce n'est pas un refus — la passe avant n'en a pas, elle n'est
         // qu'un `max` — c'est un REPORT, et c'est le terme qui manquait pour qu'une contrainte de
         // non-chevauchement devienne seulement exprimable.
         //
-        // ⚠️ La fenêtre testée commence à `setupReadyAt`, PAS à `start`. La machine est
-        // immobilisée dès la mise en train, et `setupEnd` se calcule sur le calendrier du METTEUR
-        // seul — la machine n'y est jamais consultée. Clamper sur `start` laisserait monter un
-        // article sur une broche qui coupe déjà : c'est le défaut exact qui a disqualifié la
-        // représentation par blackout, et il se reproduit par omission.
+        // Le croisement est une intersection X × Y : être sur CETTE ressource, ET recouvrir sa
+        // fenêtre SUR cette ressource. Une opération peut donc croiser sur le metteur sans croiser
+        // sur la broche, parce qu'elle partage le metteur et pas la machine. Les trois couches
+        // sont testées INDÉPENDAMMENT.
         //
-        // ⚠️ `machineFreeAt` avance avec la butée. Sinon l'immobilisation serait facturée à la
-        // machine pendant qu'elle usine la revendication — du vide facturé là où il y a du
-        // travail, l'autre moitié du même défaut.
-        List<ResourceClaim> machineClaims = claimsOnMachine[machineId];
-        for (int pass = 0; pass < machineClaims.size(); pass++) {
-            boolean pushed = false;
-            for (ResourceClaim claim : machineClaims) {
+        // ⚠️ La fenêtre machine commence à `setupReadyAt`, PAS à `start` : la machine est
+        // immobilisée dès la mise en train, et `setupEnd` se calcule sur le calendrier du METTEUR
+        // seul. Clamper sur `start` laisserait monter un article sur une broche qui coupe déjà.
+        //
+        // ⚠️ `machineFreeAt` avance avec la butée machine : sinon l'immobilisation serait facturée
+        // pendant que la machine usine la revendication — du vide facturé là où il y a du travail.
+        //
+        // POINT FIXE : sauter sur une couche peut CRÉER un croisement sur une autre. Repousser une
+        // opération derrière une revendication machine décale sa mise en train, qui peut alors
+        // tomber sur une revendication du metteur qu'elle ne croisait pas. D'où l'itération.
+        //
+        // TERMINAISON : chaque passe qui pousse fait STRICTEMENT avancer `setupReadyAt` jusqu'à la
+        // fin d'une revendication ; il y en a un nombre fini, donc au plus autant de passes que de
+        // revendications pesant sur les trois couches réunies.
+        List<ResourceClaim> onMachine = claimsOnMachine[machineId];
+        List<ResourceClaim> onSetter = claimsOnSetter[setterId];
+        List<ResourceClaim> onTooling =
+                assignedToolingId[opId] >= 0 ? claimsOnTooling[assignedToolingId[opId]] : List.of();
+        int budget = onMachine.size() + onSetter.size() + onTooling.size();
+        for (int pass = 0; pass < budget; pass++) {
+            long pushedTo = setupReadyAt;
+            for (ResourceClaim claim : onMachine) {
                 if (claim.getMachineFromEpochSec() >= end) {
                     break; // triées par début : les suivantes commencent encore plus tard
                 }
-                if (claim.getMachineToEpochSec() > setupReadyAt) {
-                    setupReadyAt = claim.getMachineToEpochSec();
-                    machineFreeAt = Math.max(machineFreeAt, setupReadyAt);
-                    setupEnd = setterCalendar[setterId].occupancyEnd(setupReadyAt, setupSeconds);
-                    start = Math.max(setupEnd, chainReadyAt);
-                    end = machineCalendar[machineId].occupancyEnd(start, op.getDurationSeconds());
-                    pushed = true;
-                }
+                pushedTo = Math.max(pushedTo, claim.getMachineToEpochSec());
             }
-            if (!pushed) {
+            long machinePushedTo = pushedTo;
+            for (ResourceClaim claim : onSetter) {
+                if (claim.getSetterFromEpochSec() >= setupEnd) {
+                    break;
+                }
+                pushedTo = Math.max(pushedTo, claim.getSetterToEpochSec());
+            }
+            for (ResourceClaim claim : onTooling) {
+                if (claim.getToolingFromEpochSec() >= setupEnd) {
+                    break;
+                }
+                pushedTo = Math.max(pushedTo, claim.getToolingToEpochSec());
+            }
+            if (pushedTo == setupReadyAt) {
                 break;
             }
+            setupReadyAt = pushedTo;
+            // Seule la butée MACHINE libère la machine plus tard : une revendication de metteur ou
+            // d'outillage ne l'occupe pas, elle la fait attendre — et cette attente-là est bien de
+            // l'immobilisation à facturer.
+            machineFreeAt = Math.max(machineFreeAt, machinePushedTo);
+            setupEnd = setterCalendar[setterId].occupancyEnd(setupReadyAt, setupSeconds);
+            start = Math.max(setupEnd, chainReadyAt);
+            end = machineCalendar[machineId].occupancyEnd(start, op.getDurationSeconds());
         }
 
         long machineIdle = setupEnd - machineFreeAt - setupSeconds;
@@ -561,6 +569,41 @@ public final class FullScoreCalculator
      * courante la laisse. Une seule définition : la passe aval et la passe amont doivent lire la
      * même, sinon la marge se calcule contre une durée qui n'a jamais été datée.
      */
+    /**
+     * Range les revendications par couche, TRIÉES PAR DÉBUT sur cette couche.
+     *
+     * <p>
+     * Une seule définition pour les trois : machine, metteur, outillage. Les trois diffèrent par
+     * l'identifiant lu et par l'instant de début — rien d'autre — et trois copies auraient dérivé.
+     *
+     * <p>
+     * Les couches sans revendication portent {@code List.of()} : c'est le cas de 1000 machines sur
+     * 1000 au réglage par défaut, donc le chemin normal, pas un cas limite.
+     */
+    @SuppressWarnings("unchecked")
+    private static List<ResourceClaim>[] groupClaims(List<ResourceClaim> claims, int layerCount,
+            java.util.function.ToIntFunction<ResourceClaim> layerOf,
+            java.util.function.ToLongFunction<ResourceClaim> startOf) {
+        List<ResourceClaim>[] byLayer = new List[layerCount];
+        Arrays.fill(byLayer, List.of());
+        for (ResourceClaim claim : claims) {
+            int layer = layerOf.applyAsInt(claim);
+            if (layer == ResourceClaim.NONE || layer >= layerCount) {
+                continue;
+            }
+            if (byLayer[layer].isEmpty()) {
+                byLayer[layer] = new ArrayList<>(2);
+            }
+            byLayer[layer].add(claim);
+        }
+        for (List<ResourceClaim> onLayer : byLayer) {
+            if (onLayer.size() > 1) {
+                onLayer.sort(Comparator.comparingLong(startOf::applyAsLong));
+            }
+        }
+        return byLayer;
+    }
+
     private long setupSecondsOf(int opId) {
         int machinePredecessor = prevOnMachineId[opId];
         // La technologie du POSTE entre dans le calcul : la préparation n'est pas la même sur

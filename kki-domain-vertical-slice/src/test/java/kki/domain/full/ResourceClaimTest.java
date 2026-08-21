@@ -169,16 +169,115 @@ class ResourceClaimTest {
                 "aucune opération sur la machine revendiquée — le test serait vrai par vacuité");
     }
 
-    /** La même instance, à la graine près, avec UNE revendication sur une machine. */
-    private static JobShopSolution withMachineClaim(int machineId, long from, long to,
-            int setupKey) {
+    @Test
+    void aClaimOnTheSETTERAloneAlsoPushes() {
+        // Le croisement est une intersection X × Y. Une opération peut croiser sur le metteur sans
+        // croiser sur la broche, parce qu'elle partage le metteur et pas la machine. Si le clamp
+        // ne regardait que la machine, cette revendication-ci ne bloquerait rien.
+        JobShopSolution base = FullDataGenerator.generate(ORDERS, SEED);
+        FullScoreCalculator before = new FullScoreCalculator();
+        before.resetWorkingSolution(base);
+
+        Operation target = base.getOperationList().get(base.getOperationList().size() / 2);
+        int targetId = (int) target.getId();
+        int setterId = (int) target.getSetter().getId();
+        // ⚠️ DIX JOURS, pas deux heures. Le calendrier du metteur est ouvert 8 h/j, 5 j/7 : une
+        // revendication courte est franchie par le seul arrondi de `occupancyEnd`, et le test
+        // passerait sans que la butée y soit pour rien. Une assertion vraie pour la mauvaise
+        // raison ne vaut pas mieux qu'une assertion absente — vérifié en falsifiant.
+        long from = before.setupStartOf(targetId) - 3600L;
+        long to = before.setupEndOf(targetId) + 10L * 24 * 3600L;
+
+        JobShopSolution withClaim = withClaims(new ResourceClaim(-1L, ResourceClaim.NONE, setterId,
+                ResourceClaim.NONE, 0, 0L, 0L, from, to, 0L, 0L));
+        FullScoreCalculator after = new FullScoreCalculator();
+        after.resetWorkingSolution(withClaim);
+
+        assertTrue(after.setupStartOf(targetId) >= to,
+                "une revendication portant SEULEMENT sur le metteur doit repousser la mise en "
+                        + "train : commencée à " + after.setupStartOf(targetId) + ", metteur "
+                        + "libéré à " + to);
+    }
+
+    @Test
+    void aPushOnOneLayerCanCreateACrossingOnAnotherAndTheClampMustIterate() {
+        // LE POINT FIXE. Repousser une opération derrière une revendication MACHINE décale sa mise
+        // en train, qui peut alors tomber sur une revendication de METTEUR qu'elle ne croisait pas
+        // avant. Une seule passe de clamp s'arrêterait à la première butée et rendrait un plan où
+        // le metteur fait deux mises en train à la fois.
+        //
+        // ⚠️ Ce test n'a de valeur que sur une opération PREMIÈRE sur sa machine ET sans
+        // prédécesseur de chaîne. Sur toute autre, le prédécesseur — déjà repoussé par la même
+        // revendication — donne un `setupEnd` élevé dès la première passe, la seconde couche est
+        // vue immédiatement, et UNE passe suffit : le test passerait sans rien prouver. Vérifié en
+        // falsifiant, et c'est la seule raison de la sélection ci-dessous.
+        JobShopSolution base = FullDataGenerator.generate(ORDERS, SEED);
+        FullScoreCalculator before = new FullScoreCalculator();
+        before.resetWorkingSolution(base);
+
+        Operation target = firstOnItsMachineWithNoChainPredecessor(base, before);
+        int targetId = (int) target.getId();
+        int machineId = (int) target.getMachineId();
+        int setterId = (int) target.getSetter().getId();
+
+        long machineFrom = base.getOriginEpochSec();
+        long machineTo = before.endOf(targetId) + 3600L;
+        // La seconde revendication commence EXACTEMENT là où la première libère : l'opération ne
+        // la croise pas AVANT le premier saut, elle la croise APRÈS. Trente jours, pour qu'aucun
+        // arrondi de calendrier ne la franchisse — une revendication courte est noyée par les
+        // 8 h/j du metteur, et le test redeviendrait vacant.
+        long setterFrom = machineTo;
+        long setterTo = machineTo + 30L * 24 * 3600L;
+
+        JobShopSolution withBoth = withClaims(
+                new ResourceClaim(-1L, machineId, ResourceClaim.NONE, ResourceClaim.NONE, 0,
+                        machineFrom, machineTo, 0L, 0L, 0L, 0L),
+                new ResourceClaim(-2L, ResourceClaim.NONE, setterId, ResourceClaim.NONE, 0,
+                        0L, 0L, setterFrom, setterTo, 0L, 0L));
+        FullScoreCalculator after = new FullScoreCalculator();
+        after.resetWorkingSolution(withBoth);
+
+        assertTrue(after.setupStartOf(targetId) >= setterTo,
+                "le clamp doit ITÉRER : après le saut machine (jusqu'à " + machineTo + ") "
+                        + target + " croise la revendication de metteur et doit être repoussée "
+                        + "jusqu'à " + setterTo + " — observé " + after.setupStartOf(targetId));
+    }
+
+    /**
+     * Une opération que rien ne précède : ni sur sa machine, ni dans sa gamme.
+     *
+     * <p>
+     * C'est la seule population sur laquelle le point fixe est OBSERVABLE. Ailleurs, le
+     * prédécesseur absorbe le premier saut et la seconde couche est vue dès la première passe.
+     */
+    private static Operation firstOnItsMachineWithNoChainPredecessor(JobShopSolution solution,
+            FullScoreCalculator calculator) {
+        for (Operation op : solution.getOperationList()) {
+            if (op.getPassIndex() != 0) {
+                continue;
+            }
+            if (calculator.setupStartOf((int) op.getId()) != solution.getOriginEpochSec()) {
+                continue;
+            }
+            return op;
+        }
+        throw new IllegalStateException(
+                "aucune opération première sur sa machine — le test serait vacant");
+    }
+
+    /** La même instance, à la graine près, avec les revendications données. */
+    private static JobShopSolution withClaims(ResourceClaim... claims) {
         JobShopSolution fresh = FullDataGenerator.generate(ORDERS, SEED);
-        ResourceClaim claim = new ResourceClaim(-1L, machineId, ResourceClaim.NONE,
-                ResourceClaim.NONE, setupKey, from, to, 0L, 0L, 0L, 0L);
         return new JobShopSolution(fresh.getOrderList(), fresh.getOperationList(),
                 fresh.getMachineList(), fresh.getSetterList(), fresh.getToolingList(),
-                fresh.getScheduleList(), List.of(claim), fresh.getSetupMatrix(),
+                fresh.getScheduleList(), List.of(claims), fresh.getSetupMatrix(),
                 fresh.getOriginEpochSec());
+    }
+
+    private static JobShopSolution withMachineClaim(int machineId, long from, long to,
+            int setupKey) {
+        return withClaims(new ResourceClaim(-1L, machineId, ResourceClaim.NONE,
+                ResourceClaim.NONE, setupKey, from, to, 0L, 0L, 0L, 0L));
     }
 
     @Test
