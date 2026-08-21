@@ -10,6 +10,7 @@ import org.optaplanner.benchmark.config.PlannerBenchmarkConfig;
 import org.optaplanner.benchmark.config.ProblemBenchmarksConfig;
 import org.optaplanner.benchmark.config.SolverBenchmarkConfig;
 import org.optaplanner.benchmark.config.statistic.ProblemStatisticType;
+import org.optaplanner.benchmark.config.statistic.SingleStatisticType;
 
 
 /**
@@ -92,6 +93,12 @@ public final class FullBenchmark {
                 ProblemStatisticType.SCORE_CALCULATION_SPEED,
                 ProblemStatisticType.STEP_SCORE,
                 ProblemStatisticType.MOVE_COUNT_PER_STEP));
+        // REQ-KKI-053 — depuis que FullScoreCalculator expose ses contraintes, la courbe peut
+        // dire QUELLE contrainte baisse, et pas seulement que le coût baisse. C'est la question
+        // « quel terme domine » qui a commandé chaque discussion de régime de ce projet :
+        // retard 2,5e13 contre metteur 3,96e07, six ordres de grandeur d'écart.
+        statistics.setSingleStatisticTypeList(List.of(
+                SingleStatisticType.CONSTRAINT_MATCH_TOTAL_BEST_SCORE));
         SolverBenchmarkConfig inherited = new SolverBenchmarkConfig();
         inherited.setProblemBenchmarksConfig(statistics);
         benchmarkConfig.setInheritedSolverBenchmarkConfig(inherited);

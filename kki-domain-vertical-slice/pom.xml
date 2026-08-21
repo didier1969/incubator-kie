@@ -38,6 +38,32 @@
       <artifactId>optaplanner-benchmark</artifactId>
       <version>999-SNAPSHOT</version>
     </dependency>
+    <!--
+      optaplanner-test n'est PAS drop-in sur ce build. Il déclare junit-jupiter-api en portée
+      COMPILE (volontairement, dit son pom : il est censé être consommé en portée test), et la
+      version que lui donne le BOM amont est plus récente que celle du module. Le JUnit Platform
+      qui vient avec porte OutputDirectoryProvider, que surefire 3.2.5 ne connaît pas : le fork
+      meurt sur un NoClassDefFoundError, avant même de lancer un test.
+
+      On exclut donc son JUnit pour laisser gagner le 5.11.0 du module. Sans ces exclusions,
+      ajouter la dépendance casse les 88 tests existants sans rapport avec elle.
+    -->
+    <dependency>
+      <groupId>org.optaplanner</groupId>
+      <artifactId>optaplanner-test</artifactId>
+      <version>999-SNAPSHOT</version>
+      <scope>test</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>org.junit.jupiter</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.junit.platform</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
     <dependency>
       <groupId>kki.bench</groupId>
       <artifactId>kki-bench-cost-kernel</artifactId>

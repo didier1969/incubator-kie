@@ -681,6 +681,13 @@ public final class FullScoreCalculator
      * Les six termes du coût, sous les noms que le moteur publiera.
      *
      * <p>
+     * <b>Aucun nom ne contient de virgule</b>, et ce n'est pas un choix de style : les points de
+     * statistique du benchmark sont sérialisés en CSV, si bien qu'une virgule dans un nom de
+     * contrainte fait échouer la relecture par un {@code NumberFormatException} au moment de
+     * produire le rapport — après la mesure, donc au pire moment. Trouvé à l'exécution, pas à la
+     * relecture.
+     *
+     * <p>
      * Ce ne sont pas des étiquettes inventées pour l'occasion : ce sont exactement les termes que
      * {@link ColdSweep#describe} imprime déjà dans {@code cost_breakdown}. Les exposer sous le
      * contrat du moteur plutôt que dans une ligne de log ouvre trois portes d'un coup — le test
@@ -690,8 +697,8 @@ public final class FullScoreCalculator
     public static final class Constraints {
         public static final String SETTER = "coût du metteur en train";
         public static final String MACHINE_IDLE = "machine à l'arrêt dans un trou du calendrier metteur";
-        public static final String TARDINESS = "retard, quadratique et pondéré par la priorité";
-        public static final String EARLINESS = "avance, quadratique et jamais pondérée";
+        public static final String TARDINESS = "retard quadratique pondéré par la priorité";
+        public static final String EARLINESS = "avance quadratique jamais pondérée";
         public static final String SOFT_FREEZE = "écart au dernier plan publié";
         public static final String HARD = "violations dures";
 
