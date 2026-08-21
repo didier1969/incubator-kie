@@ -22,7 +22,22 @@ bench_setup() {
   BENCH_CP="target/classes:$(cat target/cp.txt)"
 }
 
+# bench_witness <suffixe> — le TÉMOIN : configuration fixe, rejouée dans chaque lot.
+#
+# Sur cette machine la charge externe est permanente (load 20 sur 16 cœurs, mesuré le 2026-08-21)
+# et rien ne garantit qu'elle soit stationnaire d'un lot à l'autre. Un témoin identique intercalé
+# donne une lecture DIRECTE de la taxe payée par son lot : c'est lui qui dit si deux lots se
+# comparent, au lieu de l'espérer. Sans lui, une dérive lente de la charge externe se confond
+# parfaitement avec le traitement mesuré.
+bench_witness() {
+  bench_run "T-temoin-$1" 42 1.0 GEN 5 -Dkki.acceptor=LATE_ACCEPTANCE -Dkki.acceptorSize=5
+}
+
 # bench_run <tag> <graine> <part du second mouvement> <départ GEN|EDD> <jours ouvrés metteur> [-D…]
+#
+# ⚠️ ORDRE DES BRAS : entrelacer A,B,A,B — jamais AAA puis BBB. Enchaîner les bras par blocs est
+# le pire plan d'expérience possible sous dérive de charge : la dérive se confond alors exactement
+# avec le traitement, et corriger cela ne coûte QUE l'ordre des appels.
 bench_run() {
   local tag="$1" seed="$2" share="$3" start="$4" days="$5"; shift 5
   local log="${BENCH_OUT}/${tag}.log"

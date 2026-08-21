@@ -137,14 +137,7 @@ public final class FullRunner {
         System.out.print(oracle.resourceUsage(FullDataGenerator.horizonSeconds).describe("depart"));
         System.out.print(oracle.latenessProfile("depart"));
 
-        ScoreDirectorFactoryConfig scoreDirectorFactoryConfig = new ScoreDirectorFactoryConfig();
-        scoreDirectorFactoryConfig.setIncrementalScoreCalculatorClass(FullScoreCalculator.class);
-
-        SolverConfig solverConfig = new SolverConfig();
-        solverConfig.setSolutionClass(JobShopSolution.class);
-        solverConfig.setEntityClassList(List.of(Schedule.class));
-        solverConfig.setScoreDirectorFactoryConfig(scoreDirectorFactoryConfig);
-        solverConfig.setPhaseConfigList(phasesOf(variant, seconds));
+        SolverConfig solverConfig = solverConfigOf(variant, seconds);
         // Le détecteur de corruption DU MOTEUR, activé par -Dkki.assert=FULL_ASSERT. Il compare
         // le score incrémental à un recalcul complet APRÈS CHAQUE MOUVEMENT : c'est exactement
         // la classe de défaut qui a produit `JobShopSolutionCloner` (score annoncé ≠ plan rendu),
@@ -178,12 +171,16 @@ public final class FullRunner {
         FullScoreCalculator.PROPAGATIONS.set(0L);
         FullScoreCalculator.ENQUEUED_OPERATIONS.set(0L);
 
+        double loadAtStart = systemLoad();
+        double cpuAtStart = processCpuSeconds();
         long startNanos = System.nanoTime();
         JobShopSolution solved;
         try (SolverManager<JobShopSolution, Long> manager = SolverManager.create(solverConfig)) {
             solved = manager.solve(1L, problem).getFinalBestSolution();
         }
         double elapsed = (System.nanoTime() - startNanos) / 1_000_000_000.0;
+        double cpuSeconds = processCpuSeconds() - cpuAtStart;
+        double loadAtEnd = systemLoad();
 
         oracle.resetWorkingSolution(solved);
         System.out.print(oracle.coldSweep().describe("arrivee"));
@@ -224,7 +221,9 @@ public final class FullRunner {
                         + "start_cost_chf=%.0f end_cost_chf=%.0f soft_reduction_pct=%.2f "
                         + "hard_start=%d hard_end=%d hard_reduction_pct=%.2f verdict=%s "
                         + "dirty_per_propagation=%.1f order_changes_per_propagation=%.1f"
-                        + " cost_relevant_pct=%.2f enqueued=%d wasted_recompute_pct=%.1f%n",
+                        + " cost_relevant_pct=%.2f enqueued=%d wasted_recompute_pct=%.1f"
+                        + " budget_mode=%s cpu_seconds=%.1f cpu_over_wall=%.2f"
+                        + " load_start=%.1f load_end=%.1f cores=%d%n",
                 variant, start, seed, orderCount, elapsed, calls / elapsed, propagations,
                 startCost / 100.0, endCost / 100.0,
                 startCost == 0L ? 0.0 : 100.0 * (startCost - endCost) / (double) startCost,
@@ -238,7 +237,11 @@ public final class FullRunner {
                 // pour constater qu'une opération n'a pas bougé.
                 FullScoreCalculator.ENQUEUED_OPERATIONS.get() == 0L ? 0.0
                         : 100.0 * (FullScoreCalculator.ENQUEUED_OPERATIONS.get() - dirty)
-                                / FullScoreCalculator.ENQUEUED_OPERATIONS.get());
+                                / FullScoreCalculator.ENQUEUED_OPERATIONS.get(),
+                // Le contexte de contention, sans lequel le coût atteint ne se compare à rien.
+                BUDGET_IN_WORK ? "work" : "time", cpuSeconds,
+                elapsed == 0.0 ? 0.0 : cpuSeconds / elapsed,
+                loadAtStart, loadAtEnd, Runtime.getRuntime().availableProcessors());
         if (variant == Variant.M4) {
             System.out.printf("reassignment attempts=%d accepted=%d%n",
                     ResourceReassignmentPhaseCommand.attempts,
@@ -253,6 +256,31 @@ public final class FullRunner {
                 CriticalPairMoveIteratorFactory.SETTER_MOVES_EMITTED.get(),
                 CriticalPairMoveIteratorFactory.TOOLING_MOVES_EMITTED.get(),
                 variant == Variant.M5 ? reassignmentShare : 0.0, scarceResourceShare);
+    }
+
+    /**
+     * La configuration de solveur du banc, en UN seul endroit.
+     *
+     * <p>
+     * Partagée avec {@code FullBenchmark} : deux constructions parallèles du même solveur
+     * finiraient par diverger, et la divergence se lirait comme un effet mesuré.
+     *
+     * <p>
+     * Les réglages exposés ({@link #acceptorType}, {@link #acceptorSize},
+     * {@link #reassignmentShare}, {@link #scarceResourceShare}) sont lus À LA CONSTRUCTION et
+     * gelés dans la configuration produite. C'est ce qui permet au benchmark de matérialiser
+     * plusieurs bras dans une même JVM en faisant varier ces champs entre deux appels.
+     */
+    static SolverConfig solverConfigOf(Variant variant, long seconds) {
+        ScoreDirectorFactoryConfig scoreDirectorFactoryConfig = new ScoreDirectorFactoryConfig();
+        scoreDirectorFactoryConfig.setIncrementalScoreCalculatorClass(FullScoreCalculator.class);
+
+        SolverConfig solverConfig = new SolverConfig();
+        solverConfig.setSolutionClass(JobShopSolution.class);
+        solverConfig.setEntityClassList(List.of(Schedule.class));
+        solverConfig.setScoreDirectorFactoryConfig(scoreDirectorFactoryConfig);
+        solverConfig.setPhaseConfigList(phasesOf(variant, seconds));
+        return solverConfig;
     }
 
     /**
@@ -330,7 +358,20 @@ public final class FullRunner {
 
     private static LocalSearchPhaseConfig localSearchOf(Variant variant, long seconds) {
         TerminationConfig termination = new TerminationConfig();
-        termination.setSecondsSpentLimit(seconds);
+        if (BUDGET_IN_WORK) {
+            // Un budget en TEMPS MUR fait que la contention vole directement de la recherche :
+            // sur une machine chargée, 900 s valent moins de mouvements évalués, donc un plan
+            // plus cher — pour une raison étrangère à l'algorithme comparé. Le bruit entre alors
+            // dans la grandeur mesurée elle-même.
+            //
+            // Un budget en TRAVAIL rend la comparaison immune par construction : une machine
+            // chargée met plus longtemps, elle ne fait pas moins de recherche. C'est l'axe des
+            // décisions de moteur. Le temps mur reste l'axe du PRODUIT (`DEC-KKI-005` fixe 900 s
+            // sur l'horizon de replanification) — deux métriques, deux usages, jamais confondus.
+            termination.setScoreCalculationCountLimit(seconds);
+        } else {
+            termination.setSecondsSpentLimit(seconds);
+        }
         LocalSearchPhaseConfig localSearch = new LocalSearchPhaseConfig();
         localSearch.setTerminationConfig(termination);
         if (acceptorType != null) {
@@ -378,6 +419,37 @@ public final class FullRunner {
      * de défaut — c'est la leçon du défaut périmé corrigé en {@code f7250188} et celle de
      * {@code reassignmentShare}, dont le 0,5 n'avait jamais été mesuré.
      */
+    /**
+     * {@code -Dkki.budgetMode=work} termine sur un compte d'appels au calcul de score plutôt que
+     * sur le temps mur. L'argument de budget garde sa position ; seule son unité change.
+     */
+    private static final boolean BUDGET_IN_WORK = "work".equals(System.getProperty("kki.budgetMode"));
+
+    /**
+     * Charge de la machine, moyennée sur la dernière minute. Rend -1 là où le système ne la
+     * publie pas. Un run sur une machine dont la charge dépasse le nombre de cœurs n'a pas obtenu
+     * la machine : sans ce relevé, le chiffre publié est ininterprétable hors de son contexte, et
+     * la stationnarité ne se reconstruit qu'après coup, par chance.
+     */
+    private static double systemLoad() {
+        return java.lang.management.ManagementFactory.getOperatingSystemMXBean().getSystemLoadAverage();
+    }
+
+    /**
+     * Temps CPU consommé par le processus, en secondes ; -1 si la JVM ne l'expose pas.
+     *
+     * <p>
+     * Rapporté au temps mur, il transforme « ce run a-t-il été affamé ? » d'inconnue en quantité
+     * MESURÉE. Un run mono-fil qui obtient un cœur entier rend un rapport voisin de 1 ; nettement
+     * en dessous, il a été privé de processeur et son coût atteint ne se compare à rien.
+     */
+    private static double processCpuSeconds() {
+        var os = java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+        return os instanceof com.sun.management.OperatingSystemMXBean sunOs
+                ? sunOs.getProcessCpuTime() / 1_000_000_000.0
+                : -1.0;
+    }
+
     private static final String SCARCE_SHARE_PROPERTY = System.getProperty("kki.scarceShare");
 
     /**
