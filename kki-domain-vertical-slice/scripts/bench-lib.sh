@@ -61,6 +61,35 @@ bench_setup() {
     return 1
   fi
 
+  # ── Précondition 3 : L'IDENTITÉ DE L'ARBRE EST HORODATÉE ────────────────────
+  # La précondition 2 garantit que les classes sont celles de l'arbre AU MOMENT DU LOT. Elle ne
+  # garantit RIEN entre deux lots : une chaîne `bench-noise.sh && bench-seq.sh` recompile au
+  # démarrage du second, et une seule édition Java entre les deux ferait mesurer deux lots sur
+  # deux versions du code — sans qu'aucun garde ne s'en aperçoive, puisque chacun a bien compilé.
+  #
+  # « Ne rien éditer pendant une campagne » était encore une consigne tenue de tête, après que
+  # deux autres du même lot ont été câblées (GUI-PRO-118). Elle l'est ici, et de la seule manière
+  # utile : pas en INTERDISANT l'édition — un garde qui refuse de mesurer parce qu'un fichier a
+  # bougé finirait désarmé — mais en RENDANT LA SCISSION LISIBLE après coup.
+  #
+  # Non bloquant par construction. Chaque source est réduite à UNE valeur avec son propre repli :
+  # un `|| echo` posé sur un pipeline entier laisse passer la sortie du maillon qui a réussi ET le
+  # repli, et rend une ligne à deux valeurs — vérifié sur le cas « arbre absent ». Un relevé
+  # d'identité qui ferait échouer une campagne de deux heures coûterait plus que le défaut qu'il
+  # détecte, mais un relevé illisible ne vaut pas mieux qu'aucun relevé.
+  #
+  # L'empreinte utilise `%P` — chemin RELATIF au point de départ. Avec `%p`, deux relevés du MÊME
+  # arbre atteint par un chemin différent rendraient deux empreintes différentes, et la scission
+  # serait signalée à tort. Un garde qui crie faux finit désarmé.
+  local id_head id_sale id_classes
+  id_head="$(git -C "${BENCH_MODULE}" rev-parse --short HEAD 2>/dev/null)" || id_head=inconnu
+  id_sale="$(git -C "${BENCH_MODULE}" status --porcelain -- '*.java' 2>/dev/null | wc -l)" || id_sale=inconnu
+  id_classes="$(find "${BENCH_MODULE}/target/classes" -name '*.class' -printf '%T@ %s %P\n' 2>/dev/null \
+                  | sort | md5sum | cut -c1-12)" || id_classes=inconnu
+  printf '%s\tHEAD=%s\tjava_modifies=%s\tclasses_md5=%s\n' \
+      "$(date -Is)" "${id_head}" "${id_sale}" "${id_classes}" \
+      >> "${BENCH_OUT}/identite-arbre.tsv" 2>/dev/null || true
+
   mvn -o -q dependency:build-classpath -Dmdep.outputFile=target/cp.txt
   BENCH_CP="target/classes:$(cat target/cp.txt)"
 }
