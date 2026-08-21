@@ -3,6 +3,7 @@ package kki.domain.full;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
@@ -104,6 +105,16 @@ public final class FullScoreCalculator
     private int[] prevOnToolingId;
     private int[] nextOnToolingId;
     private int[] assignedToolingId;
+
+    /**
+     * Les revendications qui pèsent sur chaque machine, TRIÉES PAR DÉBUT (DEC-KKI-013).
+     *
+     * <p>
+     * Elles ne sont pas dans {@code operationsByMachine} : une revendication n'est pas une
+     * décision, elle est un fait que le solveur subit. Elle vit donc à CÔTÉ de la file, et la
+     * file reste ce qu'elle est — l'ordre des opérations que le solveur, lui, décide.
+     */
+    private List<ResourceClaim>[] claimsOnMachine;
 
     private List<Operation>[] operationsByMachine;
     private List<Operation>[] setupsBySetter;
@@ -219,6 +230,35 @@ public final class FullScoreCalculator
         setterList = workingSolution.getSetterList();
         for (Setter setter : workingSolution.getSetterList()) {
             setterCalendar[(int) setter.getId()] = setter.getCalendar();
+        }
+
+        claimsOnMachine = new List[machineCount];
+        for (int m = 0; m < machineCount; m++) {
+            claimsOnMachine[m] = List.of();
+        }
+        for (ResourceClaim claim : workingSolution.getClaimList()) {
+            int m = claim.getMachineId();
+            if (m == ResourceClaim.NONE) {
+                continue;
+            }
+            List<ResourceClaim> onMachine = claimsOnMachine[m];
+            if (onMachine.isEmpty()) {
+                onMachine = new ArrayList<>(2);
+                claimsOnMachine[m] = onMachine;
+            }
+            onMachine.add(claim);
+        }
+        for (List<ResourceClaim> onMachine : claimsOnMachine) {
+            // Le tri par début est ce qui autorise la sortie anticipée du clamp : dès qu'une
+            // revendication commence après la fin de l'opération, aucune des suivantes ne peut
+            // plus la croiser.
+            //
+            // Les machines sans revendication portent `List.of()`, immuable : la trier lèverait.
+            // Le cas est celui de 1000 machines sur 1000 dans la configuration par défaut, donc
+            // le garde n'est pas une précaution — c'est le chemin normal.
+            if (onMachine.size() > 1) {
+                onMachine.sort(Comparator.comparingLong(ResourceClaim::getMachineFromEpochSec));
+            }
         }
 
         operationsByMachine = new List[machineCount];
@@ -454,12 +494,50 @@ public final class FullScoreCalculator
 
         long setupReadyAt = Math.max(Math.max(machineFreeAt, setterFreeAt), toolingFreeAt);
         long setupEnd = setterCalendar[setterId].occupancyEnd(setupReadyAt, setupSeconds);
-        long machineIdle = setupEnd - machineFreeAt - setupSeconds;
 
         int chainPredecessor = chainPredecessorId[opId];
         long chainReadyAt = chainPredecessor >= 0 ? opEnd[chainPredecessor] : origin;
         long start = Math.max(setupEnd, chainReadyAt);
         long end = machineCalendar[machineId].occupancyEnd(start, op.getDurationSeconds());
+
+        // ── BUTÉE, couche machine (DEC-KKI-013) ──────────────────────────────────────────────
+        //
+        // Rien ne traverse une revendication. Une opération dont la fenêtre la croiserait est
+        // REPOUSSÉE derrière elle. Ce n'est pas un refus — la passe avant n'en a pas, elle n'est
+        // qu'un `max` — c'est un REPORT, et c'est le terme qui manquait pour qu'une contrainte de
+        // non-chevauchement devienne seulement exprimable.
+        //
+        // ⚠️ La fenêtre testée commence à `setupReadyAt`, PAS à `start`. La machine est
+        // immobilisée dès la mise en train, et `setupEnd` se calcule sur le calendrier du METTEUR
+        // seul — la machine n'y est jamais consultée. Clamper sur `start` laisserait monter un
+        // article sur une broche qui coupe déjà : c'est le défaut exact qui a disqualifié la
+        // représentation par blackout, et il se reproduit par omission.
+        //
+        // ⚠️ `machineFreeAt` avance avec la butée. Sinon l'immobilisation serait facturée à la
+        // machine pendant qu'elle usine la revendication — du vide facturé là où il y a du
+        // travail, l'autre moitié du même défaut.
+        List<ResourceClaim> machineClaims = claimsOnMachine[machineId];
+        for (int pass = 0; pass < machineClaims.size(); pass++) {
+            boolean pushed = false;
+            for (ResourceClaim claim : machineClaims) {
+                if (claim.getMachineFromEpochSec() >= end) {
+                    break; // triées par début : les suivantes commencent encore plus tard
+                }
+                if (claim.getMachineToEpochSec() > setupReadyAt) {
+                    setupReadyAt = claim.getMachineToEpochSec();
+                    machineFreeAt = Math.max(machineFreeAt, setupReadyAt);
+                    setupEnd = setterCalendar[setterId].occupancyEnd(setupReadyAt, setupSeconds);
+                    start = Math.max(setupEnd, chainReadyAt);
+                    end = machineCalendar[machineId].occupancyEnd(start, op.getDurationSeconds());
+                    pushed = true;
+                }
+            }
+            if (!pushed) {
+                break;
+            }
+        }
+
+        long machineIdle = setupEnd - machineFreeAt - setupSeconds;
 
         long resourceCents =
                 CostModel.resourceCents(setupSeconds, machineIdle, machineHourlyCents[machineId]);

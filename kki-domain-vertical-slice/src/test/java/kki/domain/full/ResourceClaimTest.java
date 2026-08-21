@@ -102,6 +102,86 @@ class ResourceClaimTest {
     }
 
     @Test
+    void anOperationThatWouldCrossAClaimIsPushedBehindIt() {
+        // Tranche V2. Rien ne traverse une revendication : l'opération qui la croiserait est
+        // REPOUSSÉE. C'est le report qui donne à la passe avant le terme de refus qu'un `max`
+        // seul ne peut pas porter.
+        JobShopSolution base = FullDataGenerator.generate(ORDERS, SEED);
+        FullScoreCalculator before = new FullScoreCalculator();
+        before.resetWorkingSolution(base);
+
+        Operation target = base.getOperationList().get(base.getOperationList().size() / 2);
+        int targetId = (int) target.getId();
+        int machineId = (int) target.getMachineId();
+        long windowFrom = before.setupStartOf(targetId) - 3600L;
+        long windowTo = before.endOf(targetId) + 3600L;
+
+        // La revendication couvre toute la fenêtre de l'opération, mise en train comprise.
+        JobShopSolution withClaim = withMachineClaim(machineId, windowFrom, windowTo, 0);
+        FullScoreCalculator after = new FullScoreCalculator();
+        after.resetWorkingSolution(withClaim);
+
+        assertTrue(after.setupStartOf(targetId) >= windowTo,
+                "l'opération devait être repoussée derrière la revendication : mise en train à "
+                        + after.setupStartOf(targetId) + ", revendication libérée à " + windowTo);
+    }
+
+    @Test
+    void noOperationEverHoldsAMachineWhileAClaimHoldsIt() {
+        // T3 — LE CHEVAUCHEMENT DEVIENT OBSERVABLE.
+        //
+        // Le garde `noMachineRunsTwoOperationsAtOnce` de ModelInvariantsTest est aujourd'hui une
+        // TAUTOLOGIE : la passe avant n'est qu'un `max`, donc elle ne PEUT pas produire deux
+        // opérations simultanées, donc le test ne peut rien détecter. La revendication est la
+        // première chose du modèle qui rende ce test capable d'échouer — parce qu'elle occupe une
+        // machine sans passer par la file, donc sans passer par le `max`.
+        //
+        // La fenêtre comparée commence à la MISE EN TRAIN : la machine est immobilisée dès là.
+        JobShopSolution base = FullDataGenerator.generate(ORDERS, SEED);
+        FullScoreCalculator before = new FullScoreCalculator();
+        before.resetWorkingSolution(base);
+
+        Operation target = base.getOperationList().get(base.getOperationList().size() / 2);
+        int machineId = (int) target.getMachineId();
+        long windowFrom = before.setupStartOf((int) target.getId()) - 3600L;
+        long windowTo = before.endOf((int) target.getId()) + 3600L;
+
+        JobShopSolution withClaim = withMachineClaim(machineId, windowFrom, windowTo, 0);
+        FullScoreCalculator after = new FullScoreCalculator();
+        after.resetWorkingSolution(withClaim);
+
+        int examined = 0;
+        for (Operation op : withClaim.getOperationList()) {
+            if ((int) op.getMachineId() != machineId) {
+                continue;
+            }
+            examined++;
+            int opId = (int) op.getId();
+            long from = after.setupStartOf(opId);
+            long to = after.endOf(opId);
+            assertTrue(to <= windowFrom || from >= windowTo,
+                    "chevauchement avec la revendication : " + op + " tient M" + machineId
+                            + " de " + from + " à " + to + ", revendiquée de " + windowFrom
+                            + " à " + windowTo);
+        }
+        // Garde de non-vacuité : un invariant qui ne regarde rien est vrai pour rien.
+        assertTrue(examined > 0,
+                "aucune opération sur la machine revendiquée — le test serait vrai par vacuité");
+    }
+
+    /** La même instance, à la graine près, avec UNE revendication sur une machine. */
+    private static JobShopSolution withMachineClaim(int machineId, long from, long to,
+            int setupKey) {
+        JobShopSolution fresh = FullDataGenerator.generate(ORDERS, SEED);
+        ResourceClaim claim = new ResourceClaim(-1L, machineId, ResourceClaim.NONE,
+                ResourceClaim.NONE, setupKey, from, to, 0L, 0L, 0L, 0L);
+        return new JobShopSolution(fresh.getOrderList(), fresh.getOperationList(),
+                fresh.getMachineList(), fresh.getSetterList(), fresh.getToolingList(),
+                fresh.getScheduleList(), List.of(claim), fresh.getSetupMatrix(),
+                fresh.getOriginEpochSec());
+    }
+
+    @Test
     void theSolutionAcceptsANullClaimListWithoutBecomingNull() {
         // Un appelant historique qui passerait null ne doit pas transformer une absence en NPE au
         // premier reset. Le vide est un état légitime ; le null n'en est pas un.
