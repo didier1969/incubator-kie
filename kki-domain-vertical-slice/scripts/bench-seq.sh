@@ -43,20 +43,8 @@ bench_setup "${MODULE}/target/seq" seq.tsv
 
 LAHC5=(-Dkki.acceptor=LATE_ACCEPTANCE -Dkki.acceptorSize=5)
 
-# Compte de calculs de score du lot TRAVAIL, dimensionné sur le bras le PLUS LENT.
-#
-# Un compte calibré sur le bras rapide ferait tourner le bras lent 3 à 4× plus longtemps en
-# temps mur et ferait exploser le calendrier de la campagne. Dérivation, à partir des débits
-# déjà mesurés (REQ-KKI-055, graine 42, LAHC-5, 900 s) :
-#   part 1,00 → 707 mvt/s   (d_réaffectation ≈ 1 042 opérations salies)
-#   part 0,50 → 260 mvt/s
-#   part 0,00 → ≈ 190 mvt/s attendu (d_échange ≈ 3 917, résolu algébriquement sur 4 équations)
-# 170 000 ≈ 190 × 900 : le bras lent tient dans ~900 s, le bras rapide en ~240 s.
-#
-# ⚠️ Cette valeur est une PRÉVISION de débit, pas une mesure. Le journal publie
-# `budget_mode=work` et `cpu_over_wall` : si le bras 0,00 dépasse largement 900 s, c'est la
-# prévision qui était fausse, pas le lot — la comparaison à compte égal reste valide.
-SEQ_WORK_BUDGET="${SEQ_WORK_BUDGET:-170000}"
+# Compte de calculs de score du lot TRAVAIL : défini UNE fois dans bench-lib.sh (SEQ_WORK_BUDGET),
+# parce que bench-noise.sh doit relever son plancher de bruit exactement à ce budget-là.
 
 echo "############ LOT 1 — budget en TEMPS MUR (${BENCH_BUDGET} s) — l'axe PRODUIT (DEC-KKI-005)"
 

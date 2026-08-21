@@ -10,6 +10,22 @@
 BENCH_BUDGET="${BENCH_BUDGET:-900}"   # DEC-KKI-005 : l'horizon de replanification glisse aux 15 min
 BENCH_ORDERS="${BENCH_ORDERS:-5000}"  # l'échelle de la cible opérateur
 
+# Compte de calculs de score du budget en TRAVAIL (`-Dkki.budgetMode=work`), dimensionné sur le
+# bras le PLUS LENT du banc. Dérivation, sur les débits mesurés (REQ-KKI-055, graine 42, LAHC-5) :
+#   part 1,00 -> 707 mvt/s  (d_réaffectation ~1 042 opérations salies)
+#   part 0,50 -> 260 mvt/s
+#   part 0,00 -> ~190 mvt/s attendu (d_échange ~3 917, résolu sur 4 équations indépendantes)
+# 170 000 ~ 190 x 900 : le bras lent tient dans ~900 s, le bras rapide en ~240 s. Un compte
+# calibré sur le bras RAPIDE ferait tourner le bras lent 3 à 4x plus longtemps.
+#
+# ⚠️ PRÉVISION de débit, pas mesure. `budget_mode` et `cpu_over_wall` sont publiés par run : un
+# dépassement se LIT au lieu de se supposer, et ne casse pas le lot (le compte reste égal).
+#
+# UNE seule définition : le lot 2 de bench-seq.sh l'ARBITRE, bench-noise.sh doit en relever le
+# plancher AU MÊME budget. Deux copies auraient dérivé, et le plancher aurait cessé d'étalonner
+# ce qu'il prétend étalonner.
+SEQ_WORK_BUDGET="${SEQ_WORK_BUDGET:-170000}"
+
 # bench_setup <répertoire de sortie> <nom du journal tsv>
 bench_setup() {
   BENCH_OUT="$1"
@@ -83,7 +99,24 @@ bench_witness() {
 bench_run() {
   local tag="$1" seed="$2" share="$3" start="$4" days="$5"; shift 5
   local log="${BENCH_OUT}/${tag}.log"
-  [ -s "${log}" ] && { echo "[$(date -Is)] ${tag} déjà fait"; return 0; }
+
+  # Reprise : un run n'est « fait » que s'il a produit un `full_result`.
+  #
+  # Le test naturel `[ -s "${log}" ]` comptait pour fait tout journal NON VIDE — donc aussi un
+  # journal TRONQUÉ, ce que laisse exactement une campagne tuée en vol. Mesuré le 2026-08-21 :
+  # `target/noise/N-time-2.log`, 1 171 octets, mort avec la session à 16:51, aucun `full_result`.
+  # Une reprise l'aurait annoncé « déjà fait », n'aurait rien ajouté au journal du lot, et la
+  # dispersion se serait calculée sur n=4 en se disant complète — un résultat qui a l'air juste.
+  #
+  # `bench_have` est le prédicat écrit dix lignes plus haut, et c'est lui qui devait garder la
+  # reprise depuis le début.
+  if bench_have "${tag}"; then
+    echo "[$(date -Is)] ${tag} déjà fait"
+    return 0
+  fi
+  if [ -f "${log}" ]; then
+    echo "[$(date -Is)] ${tag} — journal TRONQUÉ (run interrompu), rejoué"
+  fi
   echo "[$(date -Is)] ${tag}"
   java "$@" -cp "${BENCH_CP}" kki.domain.full.FullRunner \
       "${BENCH_ORDERS}" "${BENCH_BUDGET}" M5 2.0 "${days}" "${share}" "${start}" "${seed}" \

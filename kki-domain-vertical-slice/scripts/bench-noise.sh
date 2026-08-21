@@ -14,6 +14,17 @@
 #   - budget en TRAVAIL   : la contention ne peut plus voler de recherche ; ce qui reste est le
 #                           bruit irréductible du solveur (ordonnancement des tirages, GC).
 # L'écart entre les deux planchers CHIFFRE ce que la machine partagée coûte à nos mesures.
+#
+# Les deux passes n'ont PAS le même statut. La passe en TRAVAIL est une PRÉCONDITION : sans elle,
+# le lot 2 de `bench-seq.sh` se lirait contre un « ±3 % » jamais mesuré. La passe en TEMPS MUR
+# répond à une question intéressante mais séparée — ce que coûte la machine partagée — et ne
+# bloque rien.
+#
+# Réserve explicite : les deux passes tournent à `part=1,00`, alors que le bras jugé par le lot 2
+# est `part=0,00`, ~3,7x plus lent par mouvement. Le plancher rendu ici est donc celui du bras
+# RAPIDE. Les deux témoins `T2-avant`/`T2-apres` de `bench-seq.sh` donnent la lecture au bon
+# réglage, mais à n=2. Ne relever un plancher à `part=0,00` que si le lot 2 tombe dans la bande
+# « ≈ » de la grille pré-enregistrée : s'il tranche nettement, ce plancher-là ne sert à rien.
 set -euo pipefail
 MODULE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${MODULE}/scripts/bench-lib.sh"
@@ -27,11 +38,24 @@ for i in $(seq 1 "${REPEATS}"); do
   bench_run "N-time-${i}" 42 1.0 GEN 5 "${LAHC5[@]}"
 done
 
-echo "=== plancher de bruit, budget en TRAVAIL x ${REPEATS} ==="
-# Le compte est calibré sur ce qu'un run à 900 s atteint sur cette machine chargée : ~700 mvt/s,
-# soit de l'ordre de 630 000 appels au calcul de score. Volontairement le même ordre de grandeur,
-# pour que les deux passes restent comparables en durée.
-BENCH_BUDGET=630000
+# ⚠️ CORRIGÉ 2026-08-21 — un plancher se mesure AU BUDGET QU'IL ARBITRE
+#
+# La première écriture posait 630 000 calculs, « calibré pour que les deux passes restent
+# comparables en DURÉE » (~700 mvt/s x 900 s). C'était répondre à une autre question que celle
+# qui commande ce lot.
+#
+# Ce plancher ne sert qu'à une chose : dire quel écart est lisible dans le LOT 2 de
+# `bench-seq.sh`, qui tourne à 170 000 calculs (REQ-KKI-055). Un plancher relevé à 3,7x ce
+# budget n'est pas l'étalon de ce lot — et il penche du mauvais côté : un run plus COURT a moins
+# de temps pour moyenner la gigue de GC et d'ordonnancement, donc le bruit réel à 170 000 est
+# plausiblement PLUS large, jamais plus étroit. Un plancher trop optimiste rendrait significatif
+# un écart qui ne l'est pas.
+#
+# Le budget est donc lu chez celui qu'il arbitre, et exposé — jamais recopié en dur.
+NOISE_WORK_BUDGET="${NOISE_WORK_BUDGET:-${SEQ_WORK_BUDGET}}"   # bench-lib.sh
+
+echo "=== plancher de bruit, budget en TRAVAIL (${NOISE_WORK_BUDGET} calculs) x ${REPEATS} ==="
+BENCH_BUDGET="${NOISE_WORK_BUDGET}"
 for i in $(seq 1 "${REPEATS}"); do
   bench_run "N-work-${i}" 42 1.0 GEN 5 "${LAHC5[@]}" -Dkki.budgetMode=work
 done
