@@ -81,6 +81,13 @@ bench_setup() {
   # L'empreinte utilise `%P` — chemin RELATIF au point de départ. Avec `%p`, deux relevés du MÊME
   # arbre atteint par un chemin différent rendraient deux empreintes différentes, et la scission
   # serait signalée à tort. Un garde qui crie faux finit désarmé.
+  #
+  # ⚠️ LEQUEL DES TROIS CHAMPS DÉCIDE : `classes_md5`, et lui seul. `HEAD` bouge dès qu'un
+  # commit de script, de doc ou de SOLL passe entre deux lots — ce qui est le cas NORMAL d'une
+  # campagne longue pendant laquelle on continue à travailler sur ce qui ne consomme pas de
+  # CPU. Deux lots à `HEAD` différent mais `classes_md5` identique ont mesuré le MÊME code et
+  # se comparent. Lire `HEAD` comme un discriminant rendrait ce garde inutilisable dès sa
+  # première campagne, ce qui est précisément le mode de défaillance décrit juste au-dessus.
   local id_head id_sale id_classes
   id_head="$(git -C "${BENCH_MODULE}" rev-parse --short HEAD 2>/dev/null)" || id_head=inconnu
   id_sale="$(git -C "${BENCH_MODULE}" status --porcelain -- '*.java' 2>/dev/null | wc -l)" || id_sale=inconnu
