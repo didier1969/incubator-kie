@@ -278,23 +278,55 @@ public final class FullRunner {
                 localSearchOf(Variant.M3, seconds - seconds / 2));
     }
 
+    /** Vrai si l'opérateur a nommé le critère lui-même — voir {@link #acceptorSize}. */
+    private static final boolean ACCEPTOR_NAMED_BY_CALLER = System.getProperty("kki.acceptor") != null;
+
     /**
      * Critère d'acceptation, réglable par {@code -Dkki.acceptor=…} et {@code -Dkki.acceptorSize=…}.
      *
      * <p>
      * Le banc n'en configurait AUCUN : il prenait le défaut du moteur — Late Acceptance, taille
-     * 400 — sans que ce soit un choix. Toutes les mesures antérieures portent donc sur ce réglage
-     * hérité, et aucune comparaison n'a jamais été faite. C'est une dimension du banc au sens de
-     * {@code DEC-KKI-005}, et une dimension du banc se balaie.
+     * 400 — sans que ce soit un choix. Mesuré au budget qui compte, ce réglage hérité est le PIRE
+     * des quatre essayés :
+     *
+     * <pre>
+     * coût atteint à 900 s     graine 42     graine 7
+     *   LATE_ACCEPTANCE 5      1,155e12      0,975e12   &lt;- retenu
+     *   LATE_ACCEPTANCE 50     1,463e12         —
+     *   HILL_CLIMBING          1,488e12      1,275e12
+     *   LATE_ACCEPTANCE 400    2,137e12      1,832e12   &lt;- défaut du moteur, 1,85x le meilleur
+     * </pre>
      *
      * <p>
-     * {@code null} conserve le défaut du moteur, pour que les mesures d'hier restent rejouables
-     * telles quelles.
+     * Le défaut du banc est donc une valeur MESURÉE sur deux graines, pas une préférence. Elle ne
+     * vaut que pour ce régime : à 120 s le classement était différent — Hill Climbing gagnait et
+     * LAHC-5 était deuxième. Un budget court ne déplace pas seulement les valeurs, il cache la
+     * FORME de la courbe : la monotonie « file plus courte = meilleur » devient un optimum
+     * intermédiaire dès que le solveur atteint un optimum local, ce qu'il ne fait pas à 120 s.
+     *
+     * <p>
+     * Toute campagne antérieure reste rejouable en nommant la valeur :
+     * {@code -Dkki.acceptor=LATE_ACCEPTANCE -Dkki.acceptorSize=400} rend le défaut du moteur.
+     * Détail : {@code REQ-KKI-042}, {@code REQ-KKI-045}.
      */
-    public static String acceptorType = System.getProperty("kki.acceptor");
+    public static String acceptorType = System.getProperty("kki.acceptor", "LATE_ACCEPTANCE");
 
-    /** Taille de la file du critère (Late Acceptance, Step Counting, Tabu selon le type). */
-    public static Integer acceptorSize = Integer.getInteger("kki.acceptorSize");
+    /**
+     * Taille de la file du critère (Late Acceptance, Step Counting, Tabu selon le type).
+     *
+     * <p>
+     * Cinq : assez de mémoire pour s'extraire d'un optimum local, pas assez pour y errer.
+     *
+     * <p>
+     * <b>La taille ne prend son défaut que si le critère n'a PAS été nommé.</b> Sans cette
+     * précaution, {@code -Dkki.acceptor=HILL_CLIMBING} seul hériterait d'une taille 5 et basculerait
+     * de {@code setLocalSearchType} vers {@code setAcceptorConfig} — deux chemins qui ne configurent
+     * pas le même forager. Les campagnes qui ont nommé HILL_CLIMBING sans taille resteraient
+     * nominalement rejouables tout en ne mesurant plus la même chose.
+     */
+    public static Integer acceptorSize = ACCEPTOR_NAMED_BY_CALLER
+            ? Integer.getInteger("kki.acceptorSize")
+            : Integer.getInteger("kki.acceptorSize", 5);
 
     private static LocalSearchPhaseConfig localSearchOf(Variant variant, long seconds) {
         TerminationConfig termination = new TerminationConfig();
@@ -346,8 +378,26 @@ public final class FullRunner {
      * de défaut — c'est la leçon du défaut périmé corrigé en {@code f7250188} et celle de
      * {@code reassignmentShare}, dont le 0,5 n'avait jamais été mesuré.
      */
+    private static final String SCARCE_SHARE_PROPERTY = System.getProperty("kki.scarceShare");
+
+    /**
+     * Vrai si l'appelant a NOMMÉ la part, fût-ce à zéro.
+     *
+     * <p>
+     * La forme précédente, {@code getProperty("kki.scarceShare", "0.0")}, rendait
+     * {@code -Dkki.scarceShare=0.0} strictement indistinguable de l'absence de propriété — et nos
+     * deux campagnes passent précisément cette valeur ({@code bench-night.sh},
+     * {@code bench-lift.sh}). Toute logique qui voudrait dériver un défaut du régime détecté
+     * écraserait donc silencieusement la seule surcharge qui signifie « désactivé ».
+     *
+     * <p>
+     * Même faute que celle évitée sur {@link #acceptorSize} : un défaut qui rend une surcharge
+     * explicite inopérante n'est pas un défaut, c'est une perte de contrôle.
+     */
+    public static final boolean SCARCE_SHARE_NAMED_BY_CALLER = SCARCE_SHARE_PROPERTY != null;
+
     public static double scarceResourceShare =
-            Double.parseDouble(System.getProperty("kki.scarceShare", "0.0"));
+            SCARCE_SHARE_NAMED_BY_CALLER ? Double.parseDouble(SCARCE_SHARE_PROPERTY) : 0.0;
 
     /**
      * Impose l'ordre de départ demandé. {@link Start#GEN} ne trie pas : c'est l'ordre dans
@@ -399,7 +449,37 @@ public final class FullRunner {
         return config;
     }
 
-    /** Part du budget de tirage donnée au second mouvement. Dimension du banc, balayable. */
-    public static double reassignmentShare = 0.5;
+    /**
+     * Part du budget de tirage donnée au second mouvement. Dimension du banc, balayable.
+     *
+     * <p>
+     * Le 0,5 précédent n'avait jamais été mesuré. Il l'est maintenant, et l'effet de cette part
+     * change de SENS selon le critère d'acceptation :
+     *
+     * <pre>
+     * coût atteint à 900 s        part 0,5     part 0,8     part 1,0
+     *   graine 42, HILL           1,458e12     1,196e12     1,488e12
+     *   graine 42, LAHC-5           n/m        1,415e12     1,155e12
+     *   graine 7,  HILL           1,389e12     1,179e12     1,275e12
+     *   graine 7,  LAHC-5           n/m        1,373e12     0,975e12
+     * </pre>
+     *
+     * <p>
+     * Sous Hill Climbing, 0,8 est un optimum intérieur. Sous LAHC-5 — le critère retenu — la part
+     * 1,0 écrase 0,8 de 22,5 % puis 40,8 %. Le défaut suit le critère retenu, sur deux graines.
+     *
+     * <p>
+     * <b>Réserve, à ne pas taire :</b> la colonne 0,5 sous LAHC-5 n'est pas mesurée ({@code n/m}).
+     * 1,0 bat 0,8 nettement, mais la forme de la courbe sous ce critère n'est pas établie, et elle
+     * n'a pas la même forme que sous HILL. Ce défaut peut encore bouger — {@code bench-lift2.sh}
+     * ferme la colonne.
+     *
+     * <p>
+     * À 1,0 l'échange de position n'est jamais tiré ({@code swaps=0}) : la meilleure configuration
+     * mesurée n'utilise qu'un des deux mouvements. Ce n'est pas une raison de le retirer —
+     * {@code VIS-KKI-001}, un levier qui perd dans un régime devient un paramètre exposé, jamais
+     * du code supprimé. C'est précisément à ça que sert cette part.
+     */
+    public static double reassignmentShare = 1.0;
 
 }
