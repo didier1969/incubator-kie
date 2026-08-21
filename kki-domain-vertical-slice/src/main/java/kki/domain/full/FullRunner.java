@@ -471,6 +471,17 @@ public final class FullRunner {
         }
     }
 
+    /**
+     * ⚠️ Capturée à l'initialisation de la classe, contrairement à {@link #applyClaimShare()}.
+     *
+     * <p>
+     * Le défaut est le même que celui corrigé sur {@code kki.claimShare} : une constante statique
+     * fige la valeur au premier chargement, donc le câblage n'est vérifiable qu'en relançant une
+     * JVM. Il est laissé en l'état parce que le corriger déplacerait le moment de lecture d'un
+     * paramètre que trois campagnes archivées passent déjà — {@code bench-night.sh},
+     * {@code bench-lift.sh}, {@code bench-seq.sh} — et qu'un changement de ce genre se vérifie par
+     * une mesure, pas par une relecture. Suivi : {@code REQ-KKI-066}.
+     */
     private static final String SCARCE_SHARE_PROPERTY = System.getProperty("kki.scarceShare");
 
     /**

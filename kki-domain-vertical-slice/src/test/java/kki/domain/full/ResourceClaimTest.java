@@ -629,6 +629,50 @@ class ResourceClaimTest {
         }
     }
 
+    @Test
+    void theClaimShareAddsClaimsAndCHANGESNOTHINGELSEInTheInstance() {
+        // Ce que la campagne du coût de la butée exige pour être interprétable : à part non nulle,
+        // l'instance doit être la MÊME, revendications en plus. Sinon l'écart mesuré ne serait pas
+        // attribuable à la butée — il mélangerait un carnet différent.
+        //
+        // Le mécanisme n'est pas une intention : le tirage des revendications se fait APRÈS la
+        // boucle des ordres, donc il ne peut pas décaler le flux aléatoire qui les a produits. Ce
+        // test le VÉRIFIE, parce qu'un jour quelqu'un déplacera la boucle et que rien d'autre ne
+        // le dirait — l'écart se lirait alors comme un coût de la butée.
+        JobShopSolution free = FullDataGenerator.generate(ORDERS, SEED);
+        String freePrint = fingerprintOf(free);
+        try {
+            FullDataGenerator.claimShare = 0.15;
+            JobShopSolution claimed = FullDataGenerator.generate(ORDERS, SEED);
+
+            assertTrue(!claimed.getClaimList().isEmpty(), "aucune revendication — test vacant");
+            assertEquals(freePrint, fingerprintOf(claimed),
+                    "la part de revendication doit AJOUTER des revendications et ne rien changer "
+                            + "d'autre : sinon le coût mesuré n'est pas celui de la butée");
+        } finally {
+            FullDataGenerator.reset();
+        }
+    }
+
+    /** Tout ce qui décide de l'instance hors revendications : le carnet et les gammes affectées. */
+    private static String fingerprintOf(JobShopSolution solution) {
+        StringBuilder print = new StringBuilder();
+        for (Order order : solution.getOrderList()) {
+            print.append(order.getId()).append(':').append(order.getArticleId()).append(':')
+                    .append(order.getPriorityWeight()).append(':').append(order.getDueEpochSec())
+                    .append(':').append(order.getFreezeLevel()).append(':')
+                    .append(order.getReferenceCompletionEpochSec()).append('|');
+        }
+        for (Operation op : solution.getOperationList()) {
+            print.append(op.getId()).append(':').append(op.getMachineId()).append(':')
+                    .append(op.getSetter().getId()).append(':')
+                    .append(op.getTooling() == null ? -1 : op.getTooling().getId()).append(':')
+                    .append(op.getSetupKey()).append(':').append(op.getDurationSeconds())
+                    .append('|');
+        }
+        return print.toString();
+    }
+
     /**
      * La même instance avec des revendications sur les QUATRE familles de ressources.
      *
