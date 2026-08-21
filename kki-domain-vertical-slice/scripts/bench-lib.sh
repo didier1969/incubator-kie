@@ -22,6 +22,21 @@ bench_setup() {
   BENCH_CP="target/classes:$(cat target/cp.txt)"
 }
 
+# bench_field <tag> <préfixe de ligne> <clé> — lit UNE valeur d'un journal de run.
+# bench_have  <tag>                        — vrai si le run a produit un résultat complet.
+#
+# Ces deux lecteurs étaient recopiés à l'identique dans night-report.sh et depth-width-report.sh
+# (GUI-PRO-013). Ils remontent ici pour que tout nouveau rapport les prenne au lieu de les
+# recopier une quatrième fois. Les deux rapports existants ne sont PAS touchés : ils sont en
+# service sur des campagnes archivées, et les réécrire n'est pas ce que la mesure demande.
+bench_field() {
+  grep -m1 "^$2" "${BENCH_OUT}/$1.log" 2>/dev/null | tr ' ' '\n' | grep -m1 "^$3=" | cut -d= -f2-
+}
+
+bench_have() {
+  [ -s "${BENCH_OUT}/$1.log" ] && grep -q "^full_result" "${BENCH_OUT}/$1.log" 2>/dev/null
+}
+
 # bench_witness <suffixe> — le TÉMOIN : configuration fixe, rejouée dans chaque lot.
 #
 # Sur cette machine la charge externe est permanente (load 20 sur 16 cœurs, mesuré le 2026-08-21)
