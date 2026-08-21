@@ -1,14 +1,19 @@
 package kki.domain.full;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.optaplanner.core.api.score.buildin.hardsoftlong.HardSoftLongScore;
-import org.optaplanner.core.api.score.calculator.IncrementalScoreCalculator;
+import org.optaplanner.core.api.score.calculator.ConstraintMatchAwareIncrementalScoreCalculator;
+import org.optaplanner.core.api.score.constraint.ConstraintMatchTotal;
+import org.optaplanner.core.api.score.constraint.Indictment;
+import org.optaplanner.core.impl.score.constraint.DefaultConstraintMatchTotal;
 
 /**
  * Calculateur de score du domaine complet (PIL-KKI-004), incrémental.
@@ -43,7 +48,8 @@ import org.optaplanner.core.api.score.calculator.IncrementalScoreCalculator;
  * l'identifiant sont à la fois la mémoïsation du chemin chaud et l'immunité au clonage de
  * solution.
  */
-public final class FullScoreCalculator implements IncrementalScoreCalculator<JobShopSolution, HardSoftLongScore> {
+public final class FullScoreCalculator
+        implements ConstraintMatchAwareIncrementalScoreCalculator<JobShopSolution, HardSoftLongScore> {
 
     /** Assez grand pour que le rang reste (position X, passe) sans collision. */
     private static final int RANK_STRIDE = 16;
@@ -513,7 +519,33 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
      * différentiel ET de source aux lectures de coût : quatre copies de la datation finiraient
      * par diverger, et c'est la divergence qui serait invisible.
      */
+    /**
+     * La part de chaque terme de coût, ordre par ordre.
+     *
+     * <p>
+     * Six tableaux indexés par identifiant d'ordre. Ils ne sont alloués QUE si quelqu'un les
+     * demande : {@link #coldSweep()} passe {@code null} et ne paie rien, ce qui compte parce que
+     * {@code fullSweepScore()} est appelé À CHAQUE MOUVEMENT sous {@code FULL_ASSERT}.
+     */
+    public record Attribution(long[] setter, long[] machineIdle, long[] tardiness,
+            long[] earliness, long[] softFreeze, long[] hard) {
+
+        static Attribution of(int orderCount) {
+            return new Attribution(new long[orderCount], new long[orderCount], new long[orderCount],
+                    new long[orderCount], new long[orderCount], new long[orderCount]);
+        }
+    }
+
     public ColdSweep coldSweep() {
+        return coldSweep(null);
+    }
+
+    /**
+     * @param attribution si non nul, reçoit la part de chaque terme par ordre. Le balayage reste
+     *        UNIQUE : dupliquer le corps pour produire l'imputation ferait exactement la
+     *        divergence contre laquelle la javadoc ci-dessus met en garde.
+     */
+    public ColdSweep coldSweep(Attribution attribution) {
         int machineCount = machineCalendar.length;
         int setterCount = setterCalendar.length;
         int toolingCount = setupsByTooling.length;
@@ -563,8 +595,14 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                 long finish = machineCalendar[m]
                         .occupancyEnd(Math.max(setupEnd, chainReadyAt), op.getDurationSeconds());
 
-                setter += setupSeconds * CostModel.SETTER_CENTS_PER_HOUR / 3600L;
-                idle += machineIdle * machineHourlyCents[m] / 3600L;
+                long setterCost = setupSeconds * CostModel.SETTER_CENTS_PER_HOUR / 3600L;
+                long idleCost = machineIdle * machineHourlyCents[m] / 3600L;
+                setter += setterCost;
+                idle += idleCost;
+                if (attribution != null) {
+                    attribution.setter()[(int) order.getId()] += setterCost;
+                    attribution.machineIdle()[(int) order.getId()] += idleCost;
+                }
                 machineFree[m] = finish;
                 setterFree[s] = setupEnd;
                 if (t >= 0) {
@@ -580,12 +618,19 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                     ? total - CostModel.orderCents(asFree(order), chainReadyAt)
                     : 0L;
             softFreeze += freeze;
-            if (chainReadyAt > order.getDueEpochSec()) {
-                tardiness += total - freeze;
-            } else {
-                earliness += total - freeze;
+            long late = chainReadyAt > order.getDueEpochSec() ? total - freeze : 0L;
+            long early = chainReadyAt > order.getDueEpochSec() ? 0L : total - freeze;
+            tardiness += late;
+            earliness += early;
+            long hardPart = -CostModel.hardViolation(order, chainReadyAt);
+            hard += hardPart;
+            if (attribution != null) {
+                int orderIndex = (int) order.getId();
+                attribution.softFreeze()[orderIndex] += freeze;
+                attribution.tardiness()[orderIndex] += late;
+                attribution.earliness()[orderIndex] += early;
+                attribution.hard()[orderIndex] += hardPart;
             }
-            hard -= CostModel.hardViolation(order, chainReadyAt);
         }
         return new ColdSweep(setter, idle, tardiness, earliness, softFreeze, hard, completions,
                 borrowing, bound);
@@ -627,6 +672,96 @@ public final class FullScoreCalculator implements IncrementalScoreCalculator<Job
                     toolingBorrowing, toolingBound,
                     100.0 * toolingBound / Math.max(1L, toolingBorrowing));
         }
+    }
+
+    /** Paquet des contraintes, tel qu'il apparaît dans le rapport de benchmark. */
+    private static final String CONSTRAINT_PACKAGE = "kki.domain.full";
+
+    /**
+     * Les six termes du coût, sous les noms que le moteur publiera.
+     *
+     * <p>
+     * Ce ne sont pas des étiquettes inventées pour l'occasion : ce sont exactement les termes que
+     * {@link ColdSweep#describe} imprime déjà dans {@code cost_breakdown}. Les exposer sous le
+     * contrat du moteur plutôt que dans une ligne de log ouvre trois portes d'un coup — le test
+     * par contrainte via {@code AbstractScoreVerifier}, les statistiques
+     * {@code CONSTRAINT_MATCH_TOTAL_*} du benchmark, et l'explicabilité côté produit.
+     */
+    public static final class Constraints {
+        public static final String SETTER = "coût du metteur en train";
+        public static final String MACHINE_IDLE = "machine à l'arrêt dans un trou du calendrier metteur";
+        public static final String TARDINESS = "retard, quadratique et pondéré par la priorité";
+        public static final String EARLINESS = "avance, quadratique et jamais pondérée";
+        public static final String SOFT_FREEZE = "écart au dernier plan publié";
+        public static final String HARD = "violations dures";
+
+        private Constraints() {
+        }
+    }
+
+    @Override
+    public void resetWorkingSolution(JobShopSolution workingSolution, boolean constraintMatchEnabled) {
+        // Le drapeau est ignoré, comme dans l'implémentation de référence du fork
+        // (MachineReassignmentIncrementalScoreCalculator) : la décomposition est calculée À LA
+        // DEMANDE par un balayage complet, jamais maintenue de façon incrémentale. Le coût n'est
+        // donc payé que par celui qui la demande — pas à chaque mouvement.
+        resetWorkingSolution(workingSolution);
+    }
+
+    /**
+     * La décomposition du coût, imputée ORDRE PAR ORDRE.
+     *
+     * <p>
+     * Un match par couple (contrainte, ordre) plutôt qu'un agrégat par contrainte. C'est ce qui
+     * donne un {@code Indictment} réel : le moteur peut répondre « ces douze ordres portent 40 %
+     * du retard », au lieu de « le retard vaut 2,5e13 ».
+     *
+     * <p>
+     * <b>Ce que ça ouvre au-delà de l'explication.</b> Un indictment est du blâme MESURÉ. Notre
+     * {@code CriticalPairMoveIteratorFactory} guide déjà la sélection, mais sur une heuristique
+     * SUPPOSÉE — la tension des arcs disjonctifs. Une sélection pondérée par l'indictment serait
+     * guidée par ce que le coût dit réellement, et se corrigerait à chaque tour : mesurer,
+     * imputer, cibler, re-mesurer.
+     *
+     * <p>
+     * Les ordres à contribution nulle sont écartés : sur 5000 ordres la plupart des termes sont
+     * creux, et un match à zéro n'apprend rien tout en coûtant un objet.
+     */
+    @Override
+    public Collection<ConstraintMatchTotal<HardSoftLongScore>> getConstraintMatchTotals() {
+        Attribution attribution = Attribution.of(orderCents.length);
+        coldSweep(attribution);
+        List<Order> orders = schedule.getOrderSequence();
+        return List.of(
+                total(Constraints.SETTER, attribution.setter(), orders, true),
+                total(Constraints.MACHINE_IDLE, attribution.machineIdle(), orders, true),
+                total(Constraints.TARDINESS, attribution.tardiness(), orders, true),
+                total(Constraints.EARLINESS, attribution.earliness(), orders, true),
+                total(Constraints.SOFT_FREEZE, attribution.softFreeze(), orders, true),
+                total(Constraints.HARD, attribution.hard(), orders, false));
+    }
+
+    /**
+     * @param soft vrai pour un terme souple — la part y est un COÛT, donc portée au score en
+     *        négatif. Le terme dur porte déjà son signe.
+     */
+    private DefaultConstraintMatchTotal<HardSoftLongScore> total(String name, long[] byOrder,
+            List<Order> orders, boolean soft) {
+        DefaultConstraintMatchTotal<HardSoftLongScore> matchTotal =
+                new DefaultConstraintMatchTotal<>(CONSTRAINT_PACKAGE, name);
+        for (Order order : orders) {
+            long part = byOrder[(int) order.getId()];
+            if (part != 0L) {
+                matchTotal.addConstraintMatch(List.of(order),
+                        soft ? HardSoftLongScore.ofSoft(-part) : HardSoftLongScore.ofHard(part));
+            }
+        }
+        return matchTotal;
+    }
+
+    @Override
+    public Map<Object, Indictment<HardSoftLongScore>> getIndictmentMap() {
+        return null; // dérivé non-incrémentalement de getConstraintMatchTotals()
     }
 
     public HardSoftLongScore fullSweepScore() {
