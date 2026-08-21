@@ -1119,22 +1119,96 @@ public final class FullScoreCalculator
             if (machineNext >= 0) {
                 bound = Math.min(bound, latestSetupStart[machineNext]);
             }
-            latestEnd[opId] = bound;
-            latestStart[opId] = machineCalendar[assignedMachineId[opId]]
-                    .occupancyStart(bound, op.getDurationSeconds());
 
-            long setupBound = latestStart[opId];
+            int m = assignedMachineId[opId];
+            int setterId = assignedSetterId[opId];
+            long setupSeconds = setupSecondsOf(opId);
+            long successorSetupBound = Long.MAX_VALUE;
             int setterNext = nextOnSetterId[opId];
             if (setterNext >= 0) {
-                setupBound = Math.min(setupBound, latestSetupStart[setterNext]);
+                successorSetupBound = Math.min(successorSetupBound, latestSetupStart[setterNext]);
             }
             int toolingNext = nextOnToolingId[opId];
             if (toolingNext >= 0) {
-                setupBound = Math.min(setupBound, latestSetupStart[toolingNext]);
+                successorSetupBound = Math.min(successorSetupBound, latestSetupStart[toolingNext]);
             }
+
+            long start = machineCalendar[m].occupancyStart(bound, op.getDurationSeconds());
+            long setupBound = Math.min(start, successorSetupBound);
+            long setupStart = setterCalendar[setterId].occupancyStart(setupBound, setupSeconds);
+
+            // ── BUTÉE SYMÉTRIQUE (DEC-KKI-013, tranche V5) ──────────────────────────────────
+            //
+            // La passe aval REPOUSSE derrière la revendication ; la passe amont TIRE devant elle.
+            // Sans ce miroir, les deux passes datent des plans DIFFÉRENTS : l'amont rendrait des
+            // dates au plus tard antérieures aux dates au plus tôt — un battement négatif — et
+            // placerait au plus tard des opérations en plein sur une revendication.
+            //
+            // L'ancre n'est pas la même par couche, et ce n'est pas une inattention. Une
+            // revendication MACHINE tire la fin de l'usinage, parce que la machine est tenue de
+            // la mise en train jusqu'à la fin. Une revendication de METTEUR ou d'OUTILLAGE ne
+            // tire que la fin de la mise en train : avancer un réglage ne force pas à avancer
+            // l'usinage, il ouvre du battement.
+            //
+            // TERMINAISON : `bound` et le plafond de mise en train ne font que DESCENDRE, chaque
+            // fois jusqu'au début d'une revendication ; il y en a un nombre fini.
+            List<ResourceClaim> onMachine = claimsOnMachine[m];
+            List<ResourceClaim> onSetter = claimsOnSetter[setterId];
+            List<ResourceClaim> onTooling = assignedToolingId[opId] >= 0
+                    ? claimsOnTooling[assignedToolingId[opId]]
+                    : List.<ResourceClaim>of();
+            int budget = onMachine.size() + onSetter.size() + onTooling.size();
+            boolean settled = budget == 0;
+            long setupCeiling = Long.MAX_VALUE;
+            for (int pass = 0; pass <= budget; pass++) {
+                long pulledEnd = bound;
+                for (ResourceClaim claim : onMachine) {
+                    if (claim.getMachineFromEpochSec() >= bound) {
+                        break; // triées par début : les suivantes commencent encore plus tard
+                    }
+                    if (claim.getMachineToEpochSec() <= setupStart) {
+                        continue; // entièrement avant la fenêtre : elle ne la recouvre pas
+                    }
+                    pulledEnd = Math.min(pulledEnd, claim.getMachineFromEpochSec());
+                }
+                long pulledSetup = setupCeiling;
+                for (ResourceClaim claim : onSetter) {
+                    if (claim.getSetterFromEpochSec() >= setupBound) {
+                        break;
+                    }
+                    if (claim.getSetterToEpochSec() <= setupStart) {
+                        continue;
+                    }
+                    pulledSetup = Math.min(pulledSetup, claim.getSetterFromEpochSec());
+                }
+                for (ResourceClaim claim : onTooling) {
+                    if (claim.getToolingFromEpochSec() >= setupBound) {
+                        break;
+                    }
+                    if (claim.getToolingToEpochSec() <= setupStart) {
+                        continue;
+                    }
+                    pulledSetup = Math.min(pulledSetup, claim.getToolingFromEpochSec());
+                }
+                if (pulledEnd == bound && pulledSetup == setupCeiling) {
+                    settled = true;
+                    break;
+                }
+                bound = pulledEnd;
+                setupCeiling = pulledSetup;
+                start = machineCalendar[m].occupancyStart(bound, op.getDurationSeconds());
+                setupBound = Math.min(Math.min(start, successorSetupBound), setupCeiling);
+                setupStart = setterCalendar[setterId].occupancyStart(setupBound, setupSeconds);
+            }
+            if (!settled) {
+                throw new IllegalStateException("butée amont non convergée après " + budget
+                        + " passes sur l'opération " + opId);
+            }
+
+            latestEnd[opId] = bound;
+            latestStart[opId] = start;
             latestSetupEnd[opId] = setupBound;
-            latestSetupStart[opId] = setterCalendar[assignedSetterId[opId]]
-                    .occupancyStart(setupBound, setupSecondsOf(opId));
+            latestSetupStart[opId] = setupStart;
         }
 
         // Coût du MÊME plan daté au plus tard. La formule du temps machine immobilisé est celle

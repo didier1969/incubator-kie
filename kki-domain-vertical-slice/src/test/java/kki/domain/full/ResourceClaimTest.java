@@ -467,6 +467,57 @@ class ResourceClaimTest {
         }
     }
 
+    @Test
+    void theBACKWARDPassMustRespectTheClaimsToo() {
+        // T4 — LA PASSE AMONT. Elle date le MÊME plan au plus tard. Si elle ignore les
+        // revendications, elle rend des dates au plus tard ANTÉRIEURES aux dates au plus tôt : un
+        // battement négatif, c'est-à-dire un plan que les deux passes décrivent différemment.
+        // L'invariant « au plus tôt jamais après au plus tard » de BackwardPassTest tombe, et il
+        // tombe silencieusement parce qu'aucun test ne l'exerce avec des revendications.
+        //
+        // Second invariant, celui que la butée existe pour rendre exprimable : une opération
+        // datée au plus tard ne doit pas plus chevaucher une revendication qu'une opération datée
+        // au plus tôt.
+        JobShopSolution solution = withMixedClaims(150, 23L);
+        FullScoreCalculator calculator = new FullScoreCalculator();
+        calculator.resetWorkingSolution(solution);
+        FullScoreCalculator.BackwardSweep backward = calculator.backwardSweep();
+
+        for (Operation op : solution.getOperationList()) {
+            int opId = (int) op.getId();
+            assertTrue(backward.latestEnd()[opId] >= calculator.endOf(opId),
+                    op + " : fin au plus tard " + backward.latestEnd()[opId]
+                            + " ANTÉRIEURE à la fin au plus tôt " + calculator.endOf(opId)
+                            + " — la passe amont ne voit pas les revendications");
+            assertTrue(backward.latestSetupStart()[opId] >= calculator.setupStartOf(opId),
+                    op + " : mise en train au plus tard " + backward.latestSetupStart()[opId]
+                            + " ANTÉRIEURE à celle au plus tôt " + calculator.setupStartOf(opId));
+        }
+
+        int examined = 0;
+        for (ResourceClaim claim : solution.getClaimList()) {
+            if (claim.getMachineId() == ResourceClaim.NONE) {
+                continue;
+            }
+            for (Operation op : solution.getOperationList()) {
+                if ((int) op.getMachineId() != claim.getMachineId()) {
+                    continue;
+                }
+                int opId = (int) op.getId();
+                examined++;
+                long from = backward.latestSetupStart()[opId];
+                long to = backward.latestEnd()[opId];
+                assertTrue(to <= claim.getMachineFromEpochSec()
+                        || from >= claim.getMachineToEpochSec(),
+                        "datée au plus tard, " + op + " tient M" + claim.getMachineId() + " de "
+                                + from + " à " + to + " — revendiquée de "
+                                + claim.getMachineFromEpochSec() + " à "
+                                + claim.getMachineToEpochSec());
+            }
+        }
+        assertTrue(examined > 0, "aucune opération sur une machine revendiquée — test vacant");
+    }
+
     /**
      * La même instance avec des revendications sur les QUATRE familles de ressources.
      *
