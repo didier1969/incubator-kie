@@ -127,3 +127,35 @@ l'autre fixe. Protocole : 4 runs à 900 s, régime 5 jours ouvrés, `setterCount
 
 7/7 runs complets, aucun `.err` non vide. Deux défauts du banc changent, un troisième reste en
 place faute d'attribution, et deux pièges de rétrocompatibilité sont fermés avant d'avoir mordu.
+
+## La colonne fermée — et ce n'est pas la même COURBE selon le critère
+
+Seconde passe, `scripts/bench-lift2.sh`.
+
+| coût atteint à 900 s | part 0,5 | part 0,8 | part 1,0 |
+|---|---|---|---|
+| graine 42 — HILL | 1,458e12 | **1,196e12** | 1,488e12 |
+| graine 42 — LAHC-5 | 1,706e12 | 1,415e12 | **1,155e12** |
+| graine 7 — HILL | 1,389e12 | **1,179e12** | 1,275e12 |
+| graine 7 — LAHC-5 | 1,980e12 | 1,373e12 | **0,975e12** |
+
+**Sous Hill Climbing la courbe a un optimum intérieur ; sous LAHC-5 elle est monotone
+décroissante vers 1,0.** Ce ne sont pas deux valeurs différentes du même optimum, c'est deux
+FORMES différentes. Aucune interpolation entre les deux n'aurait donné le bon défaut.
+
+Et l'ancien défaut du banc, 0,5, est le point le PIRE sous le critère retenu : **+47,7 %** à la
+graine 42, **+103,1 %** à la graine 7. Un réglage jamais mesuré coûtait jusqu'au doublement du
+plan.
+
+Le défaut `reassignmentShare = 1.0` est donc établi sur deux graines et sur trois points par
+graine — la forme de la courbe est connue, pas seulement son maximum apparent.
+
+## Ce que cette campagne aurait dû être
+
+Six runs pour obtenir six points, et une inversion de verdict découverte au cinquième. Le module
+`optaplanner-benchmark` du fork produit ces courbes nativement — `BEST_SCORE` au cours du temps,
+par bras, dans un rapport HTML. Une seule exécution aurait rendu les deux formes d'un coup, et
+aurait rendu la question « 300 s ou 900 s » sans objet : la courbe se lit à n'importe quelle
+abscisse.
+
+C'est `REQ-KKI-037`, et cette campagne est l'argument le plus cher jamais produit en sa faveur.
