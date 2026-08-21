@@ -518,6 +518,117 @@ class ResourceClaimTest {
         assertTrue(examined > 0, "aucune opération sur une machine revendiquée — test vacant");
     }
 
+    @Test
+    void theGeneratorEmitsClaimsOnlyWhenTheShareIsNamed() {
+        // V6 — le banc produit des revendications, et `-Dkki.claimShare` les commande.
+        //
+        // Le câblage se prouve AVANT toute mesure. Un paramètre qui n'atteint pas le générateur
+        // rend une courbe plate, laquelle se lit « ce levier ne sert à rien » : le pire résultat
+        // possible, parce qu'il est faux et crédible (REQ-KKI-033).
+        try {
+            System.setProperty("kki.claimShare", "0.05");
+            FullRunner.applyClaimShare();
+            assertEquals(0.05, FullDataGenerator.claimShare,
+                    "la propriété doit atteindre le générateur");
+
+            JobShopSolution loaded = FullDataGenerator.generate(ORDERS, SEED);
+            assertTrue(!loaded.getClaimList().isEmpty(),
+                    "part non nulle : le générateur doit émettre des revendications");
+
+            FullDataGenerator.claimShare = 0.0;
+            assertTrue(FullDataGenerator.generate(ORDERS, SEED).getClaimList().isEmpty(),
+                    "part nulle : AUCUNE revendication, sinon les campagnes archivées cessent "
+                            + "d'être rejouables à l'identique");
+        } finally {
+            System.clearProperty("kki.claimShare");
+            FullDataGenerator.reset();
+        }
+    }
+
+    @Test
+    void anAbsentPropertyNeverOverwritesTheShare() {
+        // Absence ≠ zéro. Une propriété non nommée ne doit RIEN écrire : sinon un appelant qui a
+        // réglé la part par programme se la ferait effacer par le simple fait d'appeler le runner.
+        try {
+            System.clearProperty("kki.claimShare");
+            FullDataGenerator.claimShare = 0.3;
+            FullRunner.applyClaimShare();
+            assertEquals(0.3, FullDataGenerator.claimShare,
+                    "propriété absente : la valeur en place doit survivre");
+        } finally {
+            FullDataGenerator.reset();
+        }
+    }
+
+    @Test
+    void theThreeEndsAreDERIVEDOnEachResourceOwnCalendarAndNeverPublished() {
+        // Le manque n° 1 de l'audit, et la faute exacte qui a tué le candidat B : deux fins sur
+        // trois publiées par l'appelant au lieu d'être dérivées.
+        //
+        // Un appelant — MES, ERP, générateur de banc — ne connaît PAS le calendrier du metteur,
+        // qui est le plus contraignant du modèle. Le laisser publier une fin en temps mur revient
+        // à lui céder une compétence calendaire qu'il n'a pas. Ce test exige que le temps MUR
+        // dépasse le temps de TRAVAIL : c'est la signature d'une fin calculée sur un calendrier,
+        // et rien d'autre ne la produit.
+        try {
+            FullDataGenerator.claimShare = 0.05;
+            JobShopSolution solution = FullDataGenerator.generate(ORDERS, SEED);
+            assertTrue(!solution.getClaimList().isEmpty(), "aucune revendication — test vacant");
+
+            int stretched = 0;
+            for (ResourceClaim claim : solution.getClaimList()) {
+                Setter setter = solution.getSetterList().get(claim.getSetterId());
+                long setupWork = solution.getSetupMatrix().coldStartSeconds(claim.getSetupKey());
+                assertEquals(setter.getCalendar().occupancyEnd(claim.getSetterFromEpochSec(),
+                        setupWork), claim.getSetterToEpochSec(),
+                        "la fin METTEUR doit être dérivée sur le calendrier DU METTEUR");
+
+                Machine machine = solution.getMachineList().get(claim.getMachineId());
+                assertEquals(machine.getCalendar().occupancyEnd(claim.getSetterToEpochSec(),
+                        FullDataGenerator.claimMachiningSeconds), claim.getMachineToEpochSec(),
+                        "la fin MACHINE doit être dérivée sur le calendrier DE LA MACHINE, à "
+                                + "partir de la fin de la mise en train");
+
+                if (claim.getToolingId() != ResourceClaim.NONE) {
+                    assertEquals(claim.getSetterToEpochSec(), claim.getToolingToEpochSec(),
+                            "RENDU-OUTILLAGE : l'exemplaire revient à la FIN DE LA MISE EN TRAIN, "
+                                    + "pas à la fin de l'usinage");
+                }
+                if (claim.getSetterToEpochSec() - claim.getSetterFromEpochSec() > setupWork) {
+                    stretched++;
+                }
+            }
+            // Garde de non-vacuité : si aucune fin n'était étirée par un calendrier, l'égalité
+            // ci-dessus serait vraie pour la raison triviale « fin = début + travail », et une
+            // publication en temps mur passerait le test.
+            assertTrue(stretched > 0,
+                    "aucune fin étirée par un calendrier — le test ne distinguerait pas une fin "
+                            + "DÉRIVÉE d'une fin PUBLIÉE en temps mur");
+        } finally {
+            FullDataGenerator.reset();
+        }
+    }
+
+    @Test
+    void bothPassesAgreeOnTheClaimsTheGeneratorItselfEmits() {
+        // Les contrôles différentiels précédents portent sur des revendications posées à la main
+        // par le test. Celui-ci porte sur celles que le BANC produit — la forme réelle, trois
+        // couches liées par une cause unique, fins dérivées.
+        try {
+            FullDataGenerator.claimShare = 0.05;
+            JobShopSolution solution = FullDataGenerator.generate(ORDERS, SEED);
+            FullScoreCalculator calculator = new FullScoreCalculator();
+            calculator.resetWorkingSolution(solution);
+
+            HardSoftLongScore incremental = calculator.calculateScore();
+            HardSoftLongScore oracle = calculator.fullSweepScore();
+            assertEquals(oracle, incremental, "incrémental=" + incremental + " oracle=" + oracle
+                    + " écart_souple=" + (incremental.softScore() - oracle.softScore()));
+        } finally {
+            FullDataGenerator.reset();
+        }
+    }
+
     /**
      * La même instance avec des revendications sur les QUATRE familles de ressources.
      *

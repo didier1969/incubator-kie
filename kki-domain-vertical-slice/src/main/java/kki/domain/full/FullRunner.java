@@ -98,6 +98,7 @@ public final class FullRunner {
             seed = Long.parseLong(args[7]);
         }
 
+        applyClaimShare();
         JobShopSolution problem = FullDataGenerator.generate(orderCount, seed);
         System.out.printf("full_instance orders=%d operations=%d machines=%d setters=%d"
                 + " toolings=%d level_skew=%.1f%n",
@@ -448,6 +449,26 @@ public final class FullRunner {
         return os instanceof com.sun.management.OperatingSystemMXBean sunOs
                 ? sunOs.getProcessCpuTime() / 1_000_000_000.0
                 : -1.0;
+    }
+
+    /**
+     * Part des machines occupées à l'origine par un travail DÉJÀ LANCÉ — la BUTÉE de
+     * `DEC-KKI-013`, exposée en argument de campagne.
+     *
+     * <p>
+     * Défaut ZÉRO, comme {@code kki.scarceShare} et pour la même raison : toutes les campagnes
+     * archivées doivent rester rejouables à l'identique tant que la valeur n'est pas mesurée
+     * (`VIS-KKI-001`). Nommée par l'appelant, elle rejoint le générateur ; absente, rien ne bouge.
+     */
+    static void applyClaimShare() {
+        // Lue à l'APPEL et non capturée à l'initialisation de la classe : une constante statique
+        // fige la valeur au premier chargement, ce qui rend le câblage intestable autrement qu'en
+        // relançant une JVM — et un câblage non testé qui rend une courbe PLATE se lit « ce levier
+        // ne sert à rien ». Faux, et crédible (REQ-KKI-033).
+        String named = System.getProperty("kki.claimShare");
+        if (named != null) {
+            FullDataGenerator.claimShare = Double.parseDouble(named);
+        }
     }
 
     private static final String SCARCE_SHARE_PROPERTY = System.getProperty("kki.scarceShare");

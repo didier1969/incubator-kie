@@ -156,6 +156,23 @@ public final class FullDataGenerator {
      */
     public static double dueSlackFactor = 0.2;
     /**
+     * Part des machines occupées à l'origine par un travail DÉJÀ LANCÉ, que le solveur SUBIT.
+     *
+     * <p>
+     * <b>Défaut ZÉRO, et ce n'est pas un choix par défaut mais une condition de rejouabilité</b>
+     * (`VIS-KKI-001`) : à liste vide le calcul est identique au bit près à celui d'avant la
+     * butée, donc toutes les campagnes archivées restent comparables. Le jour où une valeur est
+     * mesurée, elle devient un argument de campagne — jamais une constante Java.
+     *
+     * <p>
+     * Exposée par {@code -Dkki.claimShare=…}. Ce qu'une revendication porte et qu'un trou de
+     * calendrier ne peut pas porter : l'ARTICLE laissé monté (`REQ-KKI-064`).
+     */
+    public static double claimShare = 0.0;
+    /** Reste d'usinage d'un travail déjà lancé, en temps de travail machine. */
+    public static long claimMachiningSeconds = 12L * 3600L;
+
+    /**
      * Part des ordres DÉJÀ en retard au moment de la replanification. « Certains ordres peuvent
      * être dus dans le passé, c'est fréquent » — et l'horizon glissant de `PIL-KKI-005` en
      * fabrique en permanence : ce qui n'a pas été fait hier est en retard aujourd'hui.
@@ -206,6 +223,8 @@ public final class FullDataGenerator {
         dueSlackFactor = 0.2;
         overdueShare = 0.12;
         overdueDepthSeconds = 21L * 24 * 3600L;
+        claimShare = 0.0;
+        claimMachiningSeconds = 12L * 3600L;
     }
 
     public static JobShopSolution generate(int orderCount, long seed) {
@@ -396,11 +415,48 @@ public final class FullDataGenerator {
 
         Schedule schedule = new Schedule();
         schedule.setOrderSequence(new ArrayList<>(orders));
-        // Aucune revendication par défaut : à liste vide le calcul est identique au bit près à
-        // celui d'avant, et toutes les campagnes antérieures restent rejouables à l'identique
-        // (VIS-KKI-001 — un réglage mesuré devient un paramètre, jamais un défaut codé en dur).
+
+        // TRAVAUX DÉJÀ LANCÉS — le solveur les SUBIT. Ce ne sont pas des ordres tronqués : la
+        // revendication est posée À CÔTÉ, les gammes restent entières et les identifiants stables,
+        // ce qui laisse `ProblemChange` opérant (manque n° 2 de l'audit).
+        //
+        // Les identifiants sont NÉGATIFS, et c'est ce qui les rend retirables : quand l'atelier
+        // avance, on retire la revendication PAR SON IDENTITÉ. Une maintenance n'a jamais besoin
+        // d'être retirée ; un ordre lancé se termine toujours.
+        List<ResourceClaim> claims = new ArrayList<>();
+        if (claimShare > 0.0) {
+            for (Machine machine : machines) {
+                if (random.nextDouble() >= claimShare) {
+                    continue;
+                }
+                int technology = machine.getTechnology();
+                List<Setter> competent = settersByTechnology.get(technology);
+                Setter setter = competent.get(
+                        nextSetterOfTechnology[technology]++ % competent.size());
+                int setupKey = setupMatrix.keyOf(random.nextInt(articleCount),
+                        random.nextInt(maxPasses));
+                int toolingType = toolingTypeOf(setupKey);
+                int toolingId = ResourceClaim.NONE;
+                if (toolingType != Operation.NO_TOOLING) {
+                    List<Tooling> copies = toolingsByType.get(toolingType);
+                    toolingId = (int) copies
+                            .get(nextToolingOfType[toolingType]++ % copies.size()).getId();
+                }
+                // Les trois FINS sont dérivées par le moteur, chacune sur le calendrier de sa
+                // PROPRE ressource — l'appelant ne publie qu'un début et un reste-à-faire.
+                claims.add(ResourceClaim.ingest(-1L - claims.size(),
+                        (int) machine.getId(), machine.getCalendar(),
+                        (int) setter.getId(), setter.getCalendar(),
+                        toolingId, setupKey, ORIGIN_EPOCH,
+                        setupMatrix.coldStartSeconds(setupKey), claimMachiningSeconds));
+            }
+        }
+
+        // À part zéro, le calcul est identique au bit près à celui d'avant la butée : toutes les
+        // campagnes antérieures restent rejouables à l'identique (VIS-KKI-001 — un réglage mesuré
+        // devient un paramètre, jamais un défaut codé en dur).
         return new JobShopSolution(orders, operations, machines, setters, toolings,
-                List.of(schedule), List.of(), setupMatrix, ORIGIN_EPOCH);
+                List.of(schedule), List.copyOf(claims), setupMatrix, ORIGIN_EPOCH);
     }
 
     /**

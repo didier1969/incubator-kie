@@ -86,6 +86,42 @@ public final class ResourceClaim {
         this.toolingToEpochSec = toolingToEpochSec;
     }
 
+    /**
+     * Ingère un ordre DÉJÀ LANCÉ : l'appelant publie un début et un RESTE-À-FAIRE, le moteur
+     * dérive les trois fins sur le calendrier de leur PROPRE ressource.
+     *
+     * <p>
+     * C'est le point où la règle « les fins sont dérivées, jamais publiées » cesse d'être une
+     * consigne pour devenir une propriété du code (`GUI-PRO-118`). Un appelant — MES, ERP,
+     * générateur de banc — ne connaît pas le calendrier du metteur, qui est le plus contraignant
+     * du modèle ; le laisser publier une fin en temps mur reviendrait à lui céder une compétence
+     * calendaire qu'il n'a pas.
+     *
+     * <p>
+     * La forme des trois intervalles suit la physique de l'atelier : le metteur et l'outillage
+     * sont pris pendant la MISE EN TRAIN, la machine depuis ce même instant et jusqu'à la fin de
+     * l'usinage — c'est ce décalage que `CPT-KKI-007` fait payer au coût horaire machine.
+     *
+     * <p>
+     * Le constructeur public reste la forme BRUTE, pour une indisponibilité datée qui n'est pas
+     * un ordre : un créneau client, un outil loué, un retour de sous-traitance. Les deux ne se
+     * confondent pas — l'une porte un reste-à-faire, l'autre des dates imposées de l'extérieur.
+     *
+     * @param toolingId        {@link #NONE} si la mise en train n'emprunte rien
+     * @param setupWorkSeconds reste de mise en train, en temps de travail du METTEUR
+     * @param machiningSeconds reste d'usinage, en temps de travail de la MACHINE
+     */
+    public static ResourceClaim ingest(long orderId, int machineId, WorkCalendar machineCalendar,
+            int setterId, WorkCalendar setterCalendar, int toolingId, int setupKey,
+            long startEpochSec, long setupWorkSeconds, long machiningSeconds) {
+        long setupEnd = setterCalendar.occupancyEnd(startEpochSec, setupWorkSeconds);
+        long machineEnd = machineCalendar.occupancyEnd(setupEnd, machiningSeconds);
+        return new ResourceClaim(orderId, machineId, setterId, toolingId, setupKey,
+                startEpochSec, machineEnd,
+                startEpochSec, setupEnd,
+                toolingId == NONE ? 0L : startEpochSec, toolingId == NONE ? 0L : setupEnd);
+    }
+
     public long getOrderId() {
         return orderId;
     }
