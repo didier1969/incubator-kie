@@ -425,22 +425,56 @@ public final class FullDataGenerator {
         // d'être retirée ; un ordre lancé se termine toujours.
         List<ResourceClaim> claims = new ArrayList<>();
         if (claimShare > 0.0) {
+            // ⚠️ UN travail à la fois par ressource. Toutes ces revendications commencent à
+            // l'origine, donc deux qui partageraient un metteur ou un exemplaire d'outillage se
+            // CHEVAUCHERAIENT — un atelier où un metteur règle deux machines en même temps.
+            //
+            // Ce n'est pas hypothétique : la simple rotation `++ % taille` produisait, à part
+            // 0,15 sur 5000 ordres graine 7, **30 collisions de metteur et 4 d'outillage**. La
+            // butée ne fait que des `max` : elle absorbe le chevauchement sans rien dire, et la
+            // campagne aurait mesuré le coût d'une instance physiquement impossible.
+            boolean[] setterClaimed = new boolean[setters.size()];
+            boolean[] toolingClaimed = new boolean[toolings.size()];
             for (Machine machine : machines) {
                 if (random.nextDouble() >= claimShare) {
                     continue;
                 }
                 int technology = machine.getTechnology();
                 List<Setter> competent = settersByTechnology.get(technology);
-                Setter setter = competent.get(
-                        nextSetterOfTechnology[technology]++ % competent.size());
+                Setter setter = null;
+                for (int probe = 0; probe < competent.size(); probe++) {
+                    Setter candidate = competent.get(
+                            nextSetterOfTechnology[technology]++ % competent.size());
+                    if (!setterClaimed[(int) candidate.getId()]) {
+                        setter = candidate;
+                        break;
+                    }
+                }
+                if (setter == null) {
+                    // Plus aucun metteur libre sur cette technologie : la part demandée dépasse ce
+                    // que l'atelier peut porter. On n'invente pas un metteur en double — la part
+                    // OBTENUE se lira dans le nombre de revendications émises.
+                    continue;
+                }
+                setterClaimed[(int) setter.getId()] = true;
                 int setupKey = setupMatrix.keyOf(random.nextInt(articleCount),
                         random.nextInt(maxPasses));
                 int toolingType = toolingTypeOf(setupKey);
                 int toolingId = ResourceClaim.NONE;
                 if (toolingType != Operation.NO_TOOLING) {
                     List<Tooling> copies = toolingsByType.get(toolingType);
-                    toolingId = (int) copies
-                            .get(nextToolingOfType[toolingType]++ % copies.size()).getId();
+                    for (int probe = 0; probe < copies.size(); probe++) {
+                        int candidate = (int) copies
+                                .get(nextToolingOfType[toolingType]++ % copies.size()).getId();
+                        if (!toolingClaimed[candidate]) {
+                            toolingId = candidate;
+                            toolingClaimed[candidate] = true;
+                            break;
+                        }
+                    }
+                    // Aucun exemplaire libre : la revendication n'emprunte rien. Un montage déjà
+                    // pris par un autre travail ne peut pas l'être deux fois, et une revendication
+                    // sans outillage reste une revendication valide.
                 }
                 // Les trois FINS sont dérivées par le moteur, chacune sur le calendrier de sa
                 // PROPRE ressource — l'appelant ne publie qu'un début et un reste-à-faire.

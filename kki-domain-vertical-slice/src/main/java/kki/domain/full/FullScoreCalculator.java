@@ -257,12 +257,15 @@ public final class FullScoreCalculator
             setterCalendar[(int) setter.getId()] = setter.getCalendar();
         }
 
-        claimsOnMachine = groupClaims(workingSolution.getClaimList(), machineCount,
-                ResourceClaim::getMachineId, ResourceClaim::getMachineFromEpochSec);
-        claimsOnSetter = groupClaims(workingSolution.getClaimList(), setterCount,
-                ResourceClaim::getSetterId, ResourceClaim::getSetterFromEpochSec);
-        claimsOnTooling = groupClaims(workingSolution.getClaimList(), toolingCount,
-                ResourceClaim::getToolingId, ResourceClaim::getToolingFromEpochSec);
+        claimsOnMachine = groupClaims(workingSolution.getClaimList(), machineCount, "M",
+                ResourceClaim::getMachineId, ResourceClaim::getMachineFromEpochSec,
+                ResourceClaim::getMachineToEpochSec);
+        claimsOnSetter = groupClaims(workingSolution.getClaimList(), setterCount, "S",
+                ResourceClaim::getSetterId, ResourceClaim::getSetterFromEpochSec,
+                ResourceClaim::getSetterToEpochSec);
+        claimsOnTooling = groupClaims(workingSolution.getClaimList(), toolingCount, "T",
+                ResourceClaim::getToolingId, ResourceClaim::getToolingFromEpochSec,
+                ResourceClaim::getToolingToEpochSec);
 
         operationsByMachine = new List[machineCount];
         for (int m = 0; m < machineCount; m++) {
@@ -647,8 +650,9 @@ public final class FullScoreCalculator
      */
     @SuppressWarnings("unchecked")
     private static List<ResourceClaim>[] groupClaims(List<ResourceClaim> claims, int layerCount,
-            java.util.function.ToIntFunction<ResourceClaim> layerOf,
-            java.util.function.ToLongFunction<ResourceClaim> startOf) {
+            String layerName, java.util.function.ToIntFunction<ResourceClaim> layerOf,
+            java.util.function.ToLongFunction<ResourceClaim> startOf,
+            java.util.function.ToLongFunction<ResourceClaim> endOf) {
         List<ResourceClaim>[] byLayer = new List[layerCount];
         Arrays.fill(byLayer, List.of());
         for (ResourceClaim claim : claims) {
@@ -661,9 +665,30 @@ public final class FullScoreCalculator
             }
             byLayer[layer].add(claim);
         }
-        for (List<ResourceClaim> onLayer : byLayer) {
-            if (onLayer.size() > 1) {
-                onLayer.sort(Comparator.comparingLong(startOf::applyAsLong));
+        for (int layer = 0; layer < layerCount; layer++) {
+            List<ResourceClaim> onLayer = byLayer[layer];
+            if (onLayer.size() < 2) {
+                continue;
+            }
+            onLayer.sort(Comparator.comparingLong(startOf::applyAsLong));
+            // GARDE D'INGESTION — deux revendications ne peuvent pas tenir la MÊME ressource au
+            // MÊME instant. Ce n'est pas une vérification de confort : la butée ne fait que des
+            // `max`, donc elle ABSORBE un chevauchement de revendications sans rien dire, et la
+            // contradiction disparaît dans un chiffre plausible. C'est exactement la classe de
+            // défaut que cette exigence existe pour rendre EXPRIMABLE — la laisser du côté des
+            // données serait la réintroduire par la porte de derrière.
+            //
+            // Triées par début, il suffit de comparer chaque revendication à la précédente
+            // (GUI-PRO-118 : une précondition devient une assertion, jamais une consigne).
+            for (int i = 1; i < onLayer.size(); i++) {
+                ResourceClaim previous = onLayer.get(i - 1);
+                ResourceClaim current = onLayer.get(i);
+                if (startOf.applyAsLong(current) < endOf.applyAsLong(previous)) {
+                    throw new IllegalArgumentException("deux revendications tiennent " + layerName
+                            + layer + " en même temps : ordre " + previous.getOrderId() + " jusqu'à "
+                            + endOf.applyAsLong(previous) + ", ordre " + current.getOrderId()
+                            + " dès " + startOf.applyAsLong(current));
+                }
             }
         }
         return byLayer;

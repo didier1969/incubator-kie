@@ -3,6 +3,7 @@ package kki.domain.full;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -649,6 +650,114 @@ class ResourceClaimTest {
             assertEquals(freePrint, fingerprintOf(claimed),
                     "la part de revendication doit AJOUTER des revendications et ne rien changer "
                             + "d'autre : sinon le coût mesuré n'est pas celui de la butée");
+        } finally {
+            FullDataGenerator.reset();
+        }
+    }
+
+    @Test
+    void aClaimOnTheTOOLINGAloneAlsoPushes() {
+        // La QUATRIÈME famille, et la seule qu'aucun test ne falsifiait seule. Elle était câblée
+        // et exercée en compagnie des autres — ce qui ne prouve rien : une couche morte passe
+        // inaperçue tant qu'une autre pousse à sa place.
+        //
+        // ⚠️ `Tooling` n'a délibérément AUCUN `WorkCalendar` : un montage n'a pas d'horaire, il est
+        // pris ou rendu. La revendication doit donc pousser par elle-même, sans qu'un arrondi de
+        // calendrier puisse s'en charger.
+        JobShopSolution base = FullDataGenerator.generate(ORDERS, SEED);
+        FullScoreCalculator before = new FullScoreCalculator();
+        before.resetWorkingSolution(base);
+
+        Operation target = null;
+        for (Operation op : base.getOperationList()) {
+            if (op.getTooling() != null) {
+                target = op;
+                break;
+            }
+        }
+        assertTrue(target != null, "aucune opération n'emprunte d'outillage — test vacant");
+        int targetId = (int) target.getId();
+        int toolingId = (int) target.getTooling().getId();
+        long from = before.setupStartOf(targetId) - 3600L;
+        long to = before.setupEndOf(targetId) + 30L * 24 * 3600L;
+
+        JobShopSolution withClaim = withClaims(new ResourceClaim(-1L, ResourceClaim.NONE,
+                ResourceClaim.NONE, toolingId, 0, 0L, 0L, 0L, 0L, from, to));
+        FullScoreCalculator after = new FullScoreCalculator();
+        after.resetWorkingSolution(withClaim);
+
+        assertTrue(after.setupStartOf(targetId) >= to,
+                "une revendication portant SEULEMENT sur l'outillage doit repousser la mise en "
+                        + "train : commencée à " + after.setupStartOf(targetId) + ", exemplaire "
+                        + "rendu à " + to);
+    }
+
+    @Test
+    void twoClaimsHoldingTheSameResourceAtOnceAreREFUSEDAtIngestion() {
+        // GARDE D'INGESTION (manque n° 5 de l'audit, reformulé). La butée ne fait que des `max` :
+        // elle ABSORBE un chevauchement entre deux revendications sans rien dire, et la
+        // contradiction disparaît dans un chiffre plausible. C'est très exactement la classe de
+        // défaut que cette exigence existe pour rendre EXPRIMABLE — la laisser entrer par les
+        // données serait la réintroduire par la porte de derrière.
+        long origin = FullDataGenerator.generate(1, SEED).getOriginEpochSec();
+        long day = 24L * 3600L;
+
+        assertThrows(IllegalArgumentException.class, () -> {
+            FullScoreCalculator calculator = new FullScoreCalculator();
+            calculator.resetWorkingSolution(withClaims(
+                    new ResourceClaim(-1L, 7, ResourceClaim.NONE, ResourceClaim.NONE, 0,
+                            origin, origin + 10 * day, 0L, 0L, 0L, 0L),
+                    new ResourceClaim(-2L, 7, ResourceClaim.NONE, ResourceClaim.NONE, 0,
+                            origin + 5 * day, origin + 20 * day, 0L, 0L, 0L, 0L)));
+        }, "deux revendications tenant la MACHINE 7 en même temps doivent être refusées");
+
+        assertThrows(IllegalArgumentException.class, () -> {
+            FullScoreCalculator calculator = new FullScoreCalculator();
+            calculator.resetWorkingSolution(withClaims(
+                    new ResourceClaim(-1L, ResourceClaim.NONE, 3, ResourceClaim.NONE, 0,
+                            0L, 0L, origin, origin + 10 * day, 0L, 0L),
+                    new ResourceClaim(-2L, ResourceClaim.NONE, 3, ResourceClaim.NONE, 0,
+                            0L, 0L, origin + 5 * day, origin + 20 * day, 0L, 0L)));
+        }, "un metteur ne règle pas deux machines en même temps");
+
+        assertThrows(IllegalArgumentException.class, () -> {
+            FullScoreCalculator calculator = new FullScoreCalculator();
+            calculator.resetWorkingSolution(withClaims(
+                    new ResourceClaim(-1L, ResourceClaim.NONE, ResourceClaim.NONE, 2, 0,
+                            0L, 0L, 0L, 0L, origin, origin + 10 * day),
+                    new ResourceClaim(-2L, ResourceClaim.NONE, ResourceClaim.NONE, 2, 0,
+                            0L, 0L, 0L, 0L, origin + 5 * day, origin + 20 * day)));
+        }, "un exemplaire d'outillage n'est pas emprunté deux fois à la fois");
+
+        // Et le contre-exemple : deux revendications qui se SUCCÈDENT sur la même ressource sont
+        // parfaitement légitimes. Une garde qui refuserait aussi celles-là interdirait de décrire
+        // une machine qui enchaîne deux travaux — c'est-à-dire un atelier.
+        FullScoreCalculator calculator = new FullScoreCalculator();
+        calculator.resetWorkingSolution(withClaims(
+                new ResourceClaim(-1L, 7, ResourceClaim.NONE, ResourceClaim.NONE, 0,
+                        origin, origin + 10 * day, 0L, 0L, 0L, 0L),
+                new ResourceClaim(-2L, 7, ResourceClaim.NONE, ResourceClaim.NONE, 0,
+                        origin + 10 * day, origin + 20 * day, 0L, 0L, 0L, 0L)));
+        assertTrue(calculator.calculateScore().hardScore() <= 0L,
+                "deux revendications qui se SUCCÈDENT doivent être acceptées");
+    }
+
+    @Test
+    void theGeneratorNeverPutsTwoClaimsOnTheSameResource() {
+        // À forte part, la simple rotation `++ % taille` produisait des collisions : mesuré, 30
+        // sur le metteur et 4 sur l'outillage à part 0,15 sur l'instance du banc. La garde
+        // d'ingestion les refuse désormais — encore faut-il que le générateur n'en fabrique pas.
+        //
+        // Part volontairement FORTE : c'est la pression sur le pool qui révèle le défaut, pas la
+        // part nominale des campagnes.
+        try {
+            FullDataGenerator.claimShare = 0.5;
+            JobShopSolution solution = FullDataGenerator.generate(ORDERS, SEED);
+            assertTrue(solution.getClaimList().size() > 100,
+                    "part forte : il faut assez de revendications pour que le pool morde, vues "
+                            + solution.getClaimList().size());
+            // Le reset lève si deux revendications se chevauchent sur une couche.
+            new FullScoreCalculator().resetWorkingSolution(solution);
         } finally {
             FullDataGenerator.reset();
         }
