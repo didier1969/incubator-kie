@@ -18,6 +18,33 @@ bench_setup() {
   export PATH=/home/dstadel/projects/kie/.devenv/profile/bin:$PATH
   cd "${BENCH_MODULE}"
   mkdir -p "${BENCH_OUT}"
+
+  # ── Précondition 1 : EXCLUSIVITÉ ───────────────────────────────────────────────
+  # « Ne rien lancer de lourd pendant une campagne » était une consigne tenue de tête. Elle a
+  # déjà coûté une campagne tuée et un classement INVERSÉ (REQ-KKI-052, pratique #1218) : deux
+  # JVM se disputent le L3, et notre calcul de score est du parcours de pointeurs. Une consigne
+  # non câblée n'est pas tenue (GUI-PRO-118) — elle l'est ici.
+  # Le motif exige le `java ` : sans lui, tout shell dont la ligne de commande CITE le nom de
+  # classe — un `pgrep` de contrôle, un `grep` dans un journal — se dénonce lui-même, et un garde
+  # qui crie à tort finit désarmé.
+  local intruders
+  intruders="$(pgrep -f 'java .* kki\.domain\.full\.' 2>/dev/null || true)"
+  if [ -n "${intruders}" ]; then
+    echo "⛔ un banc tourne déjà (PID $(echo "${intruders}" | tr '\n' ' ')) — la contention" >&2
+    echo "   inverse les classements. Attendre, ou BENCH_FORCE=1 pour passer outre." >&2
+    [ "${BENCH_FORCE:-0}" = "1" ] || return 1
+    echo "   BENCH_FORCE=1 : les runs de ce lot sont CONTENDUS et ne se comparent à rien." >&2
+  fi
+
+  # ── Précondition 2 : LES CLASSES SONT CELLES DE L'ARBRE ────────────────────────
+  # `dependency:build-classpath` ne compile pas. Une campagne pouvait donc mesurer, en silence,
+  # du code qui n'est plus celui du dépôt — la pire classe de défaut ici : le résultat a l'air
+  # juste. On compile plutôt que de détecter, et on échoue fort.
+  if ! mvn -o -q compile; then
+    echo "⛔ compilation échouée — aucune mesure ne serait interprétable. Campagne annulée." >&2
+    return 1
+  fi
+
   mvn -o -q dependency:build-classpath -Dmdep.outputFile=target/cp.txt
   BENCH_CP="target/classes:$(cat target/cp.txt)"
 }
