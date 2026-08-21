@@ -46,6 +46,15 @@ public abstract class AbstractScoreDirectorFactory<Solution_, Score_ extends Sco
     protected InnerScoreDirectorFactory<Solution_, Score_> assertionScoreDirectorFactory = null;
 
     protected boolean assertClonedSolution = false;
+    /**
+     * REQ-KKI-047 — arme le registre d'équilibre des notifications de variable.
+     *
+     * <p>
+     * Volontairement HORS de {@code EnvironmentMode} : durcir {@code FULL_ASSERT} imposerait une
+     * règle neuve à tout projet tiers dont un listener est légitimement asymétrique. Opt-in, sur
+     * le modèle exact de {@link #assertClonedSolution}.
+     */
+    protected boolean assertVariableNotificationBalance = false;
 
     public AbstractScoreDirectorFactory(SolutionDescriptor<Solution_> solutionDescriptor) {
         this.solutionDescriptor = solutionDescriptor;
@@ -80,6 +89,14 @@ public abstract class AbstractScoreDirectorFactory<Solution_, Score_ extends Sco
 
     public boolean isAssertClonedSolution() {
         return assertClonedSolution;
+    }
+
+    public boolean isAssertVariableNotificationBalance() {
+        return assertVariableNotificationBalance;
+    }
+
+    public void setAssertVariableNotificationBalance(boolean assertVariableNotificationBalance) {
+        this.assertVariableNotificationBalance = assertVariableNotificationBalance;
     }
 
     public void setAssertClonedSolution(boolean assertClonedSolution) {

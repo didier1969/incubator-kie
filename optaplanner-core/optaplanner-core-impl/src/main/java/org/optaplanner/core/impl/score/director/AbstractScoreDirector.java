@@ -53,6 +53,7 @@ import org.optaplanner.core.impl.domain.solution.descriptor.SolutionDescriptor;
 import org.optaplanner.core.impl.domain.variable.descriptor.ListVariableDescriptor;
 import org.optaplanner.core.impl.domain.variable.descriptor.VariableDescriptor;
 import org.optaplanner.core.impl.domain.variable.listener.support.VariableListenerSupport;
+import org.optaplanner.core.impl.domain.variable.listener.support.violation.VariableNotificationBalanceLedger;
 import org.optaplanner.core.impl.domain.variable.supply.SupplyManager;
 import org.optaplanner.core.impl.heuristic.move.Move;
 import org.optaplanner.core.impl.score.definition.ScoreDefinition;
@@ -82,6 +83,8 @@ public abstract class AbstractScoreDirector<Solution_, Score_ extends Score<Scor
     protected final LookUpManager lookUpManager;
     protected boolean constraintMatchEnabledPreference;
     protected final VariableListenerSupport<Solution_> variableListenerSupport;
+    /** REQ-KKI-047 — éteint par défaut, sans allocation. */
+    protected final VariableNotificationBalanceLedger notificationBalanceLedger;
 
     protected Solution_ workingSolution;
     protected long workingEntityListRevision = 0L;
@@ -99,6 +102,8 @@ public abstract class AbstractScoreDirector<Solution_, Score_ extends Score<Scor
                 ? new LookUpManager(scoreDirectorFactory.getSolutionDescriptor().getLookUpStrategyResolver())
                 : null;
         this.constraintMatchEnabledPreference = constraintMatchEnabledPreference;
+        this.notificationBalanceLedger = new VariableNotificationBalanceLedger(
+                scoreDirectorFactory.isAssertVariableNotificationBalance());
         variableListenerSupport = VariableListenerSupport.create(this);
         variableListenerSupport.linkVariableListeners();
     }
@@ -283,6 +288,7 @@ public abstract class AbstractScoreDirector<Solution_, Score_ extends Score<Scor
 
     @Override
     public void triggerVariableListeners() {
+        notificationBalanceLedger.assertBalancedAndReset();
         variableListenerSupport.triggerVariableListenersInNotificationQueues();
     }
 
@@ -436,6 +442,7 @@ public abstract class AbstractScoreDirector<Solution_, Score_ extends Score<Scor
 
     @Override
     public void beforeVariableChanged(VariableDescriptor<Solution_> variableDescriptor, Object entity) {
+        notificationBalanceLedger.open(variableDescriptor, entity);
         if (variableDescriptor.isGenuineAndUninitialized(entity)) {
             workingInitScore++;
         }
@@ -444,6 +451,7 @@ public abstract class AbstractScoreDirector<Solution_, Score_ extends Score<Scor
 
     @Override
     public void afterVariableChanged(VariableDescriptor<Solution_> variableDescriptor, Object entity) {
+        notificationBalanceLedger.close(variableDescriptor, entity);
         if (variableDescriptor.isGenuineAndUninitialized(entity)) {
             workingInitScore--;
         }
@@ -458,21 +466,25 @@ public abstract class AbstractScoreDirector<Solution_, Score_ extends Score<Scor
 
     @Override
     public void beforeListVariableElementAssigned(ListVariableDescriptor<Solution_> variableDescriptor, Object element) {
+        notificationBalanceLedger.open(variableDescriptor, element);
         // Do nothing
     }
 
     @Override
     public void afterListVariableElementAssigned(ListVariableDescriptor<Solution_> variableDescriptor, Object element) {
+        notificationBalanceLedger.close(variableDescriptor, element);
         workingInitScore++;
     }
 
     @Override
     public void beforeListVariableElementUnassigned(ListVariableDescriptor<Solution_> variableDescriptor, Object element) {
+        notificationBalanceLedger.open(variableDescriptor, element);
         // Do nothing
     }
 
     @Override
     public void afterListVariableElementUnassigned(ListVariableDescriptor<Solution_> variableDescriptor, Object element) {
+        notificationBalanceLedger.close(variableDescriptor, element);
         workingInitScore--;
         variableListenerSupport.afterElementUnassigned(variableDescriptor, element);
     }
@@ -480,12 +492,14 @@ public abstract class AbstractScoreDirector<Solution_, Score_ extends Score<Scor
     @Override
     public void beforeListVariableChanged(ListVariableDescriptor<Solution_> variableDescriptor,
             Object entity, int fromIndex, int toIndex) {
+        notificationBalanceLedger.open(variableDescriptor, entity);
         variableListenerSupport.beforeListVariableChanged(variableDescriptor, entity, fromIndex, toIndex);
     }
 
     @Override
     public void afterListVariableChanged(ListVariableDescriptor<Solution_> variableDescriptor,
             Object entity, int fromIndex, int toIndex) {
+        notificationBalanceLedger.close(variableDescriptor, entity);
         variableListenerSupport.afterListVariableChanged(variableDescriptor, entity, fromIndex, toIndex);
     }
 
