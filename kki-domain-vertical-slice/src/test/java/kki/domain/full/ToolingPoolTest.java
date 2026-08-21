@@ -162,7 +162,7 @@ class ToolingPoolTest {
             List<Tooling> pool = shareTheTooling ? List.of(toolingA) : List.of(toolingA, toolingB);
             JobShopSolution solution = new JobShopSolution(List.of(orderA, orderB),
                     List.of(opA, opB), List.of(machineA, machineB), List.of(setterA, setterB),
-                    pool, List.of(schedule), matrix, 0L);
+                    pool, List.of(schedule), List.of(), matrix, 0L);
 
             FullScoreCalculator calculator = new FullScoreCalculator();
             calculator.resetWorkingSolution(solution);

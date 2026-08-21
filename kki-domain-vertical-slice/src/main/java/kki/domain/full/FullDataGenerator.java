@@ -396,8 +396,11 @@ public final class FullDataGenerator {
 
         Schedule schedule = new Schedule();
         schedule.setOrderSequence(new ArrayList<>(orders));
+        // Aucune revendication par défaut : à liste vide le calcul est identique au bit près à
+        // celui d'avant, et toutes les campagnes antérieures restent rejouables à l'identique
+        // (VIS-KKI-001 — un réglage mesuré devient un paramètre, jamais un défaut codé en dur).
         return new JobShopSolution(orders, operations, machines, setters, toolings,
-                List.of(schedule), setupMatrix, ORIGIN_EPOCH);
+                List.of(schedule), List.of(), setupMatrix, ORIGIN_EPOCH);
     }
 
     /**

@@ -51,6 +51,20 @@ public class JobShopSolution {
     @ProblemFactCollectionProperty
     private List<Tooling> toolingList;
 
+    /**
+     * Les occupations à dates FIXES que le solveur SUBIT (CPT-KKI-010 palier 1 et 4, DEC-KKI-013).
+     *
+     * <p>
+     * Distinctes des trous de calendrier : une maintenance ou des vacances ne bloquent QU'UNE
+     * ressource, n'ont aucune identité, et laissent l'article monté. Une revendication a une
+     * identité, bloque trois couches à des instants liés, et laisse SON article sur la broche.
+     *
+     * <p>
+     * Vide par défaut : à liste vide, le calcul est identique au bit près à celui d'avant.
+     */
+    @ProblemFactCollectionProperty
+    private List<ResourceClaim> claimList = List.of();
+
     @PlanningEntityCollectionProperty
     private List<Schedule> scheduleList;
 
@@ -65,13 +79,15 @@ public class JobShopSolution {
 
     public JobShopSolution(List<Order> orderList, List<Operation> operationList,
             List<Machine> machineList, List<Setter> setterList, List<Tooling> toolingList,
-            List<Schedule> scheduleList, SetupMatrix setupMatrix, long originEpochSec) {
+            List<Schedule> scheduleList, List<ResourceClaim> claimList, SetupMatrix setupMatrix,
+            long originEpochSec) {
         this.orderList = orderList;
         this.operationList = operationList;
         this.machineList = machineList;
         this.setterList = setterList;
         this.toolingList = toolingList;
         this.scheduleList = scheduleList;
+        this.claimList = claimList == null ? List.of() : claimList;
         this.setupMatrix = setupMatrix;
         this.originEpochSec = originEpochSec;
     }
@@ -98,6 +114,10 @@ public class JobShopSolution {
 
     public List<Schedule> getScheduleList() {
         return scheduleList;
+    }
+
+    public List<ResourceClaim> getClaimList() {
+        return claimList;
     }
 
     public HardSoftLongScore getScore() {

@@ -77,7 +77,11 @@ public final class JobShopSolutionCloner implements SolutionCloner<JobShopSoluti
 
         JobShopSolution clone = new JobShopSolution(clonedOrders, clonedOperations,
                 original.getMachineList(), original.getSetterList(), original.getToolingList(),
-                List.of(clonedSchedule), original.getSetupMatrix(), original.getOriginEpochSec());
+                // Les revendications sont IMMUABLES et ne sont jamais mutées en cours de
+                // résolution : elles se partagent par référence, comme Machine, Setter et
+                // SetupMatrix. Rien à cloner, donc rien à oublier de cloner.
+                List.of(clonedSchedule), original.getClaimList(), original.getSetupMatrix(),
+                original.getOriginEpochSec());
         clone.setScore(original.getScore());
         return clone;
     }
