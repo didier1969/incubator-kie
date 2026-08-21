@@ -1,10 +1,14 @@
 package kki.domain.full;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Random;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -241,6 +245,266 @@ class ResourceClaimTest {
                 "le clamp doit ITÉRER : après le saut machine (jusqu'à " + machineTo + ") "
                         + target + " croise la revendication de metteur et doit être repoussée "
                         + "jusqu'à " + setterTo + " — observé " + after.setupStartOf(targetId));
+    }
+
+    @Test
+    void theColdSweepMustSeeTheSameClaimsAsTheIncrementalPass() {
+        // T-DIFF — l'oracle redevient un oracle.
+        //
+        // V2 et V3 ont posé la butée dans `recomputeOperation` SEULEMENT. `coldSweep` datait
+        // encore par le seul `max` des trois disponibilités de file, sans jamais consulter une
+        // revendication. Les deux passes rendaient donc deux plans différents dès qu'une
+        // revendication existait — et rien ne le disait, parce que T1 compare les deux passes sur
+        // une liste VIDE, où il n'y a rien à voir.
+        //
+        // Le désaccord se lit en CHIFFRES, pas en « pas égaux » : c'est l'écart qui nomme la
+        // cause.
+        JobShopSolution base = FullDataGenerator.generate(ORDERS, SEED);
+        FullScoreCalculator before = new FullScoreCalculator();
+        before.resetWorkingSolution(base);
+
+        Operation target = base.getOperationList().get(base.getOperationList().size() / 2);
+        int targetId = (int) target.getId();
+        int machineId = (int) target.getMachineId();
+        long from = before.setupStartOf(targetId) - 3600L;
+        long to = before.endOf(targetId) + 30L * 24 * 3600L;
+
+        JobShopSolution withClaim = withMachineClaim(machineId, from, to, 0);
+        FullScoreCalculator after = new FullScoreCalculator();
+        after.resetWorkingSolution(withClaim);
+
+        HardSoftLongScore incremental = after.calculateScore();
+        HardSoftLongScore oracle = after.fullSweepScore();
+
+        assertEquals(oracle, incremental,
+                "revendications NON VIDES : le chemin incrémental et le balayage à froid doivent "
+                        + "rendre le MÊME score. incrémental=" + incremental + " oracle=" + oracle
+                        + " écart_souple=" + (incremental.softScore() - oracle.softScore()));
+    }
+
+    @Test
+    void theSetupKeyComesFromTheCLAIMWhenTheClaimIsTheLastOccupantOfTheMachine() {
+        // T2 — LE FALSIFICATEUR PRINCIPAL DE LA CONCEPTION.
+        //
+        // Un trou de calendrier dit « fermé, état PRÉSERVÉ » : l'article reste monté, rien n'est à
+        // remonter au matin. Une revendication dit l'inverse : « pris, état DÉTRUIT » — un autre
+        // travail y est passé et a laissé SON article. Toute la conception tient dans cet écart,
+        // et il ne se chiffre qu'ici : quand l'article laissé par la revendication est celui que
+        // l'opération suivante demande, la remise en train vaut EXACTEMENT ZÉRO.
+        //
+        // ⚠️ L'opération est prise PREMIÈRE sur sa machine, et ce n'est pas un détail de mise en
+        // scène. Sur toute autre, le prédécesseur de file pourrait porter le même article et la
+        // mise en train vaudrait zéro sans que la revendication y soit pour rien. Première sur sa
+        // machine, la seule autre valeur possible est le démarrage à froid — un nombre qu'aucun
+        // autre mécanisme du modèle ne produit.
+        //
+        // SI CE TEST ÉCHOUE, C'EST LA CONCEPTION QUI EST FAUSSE, PAS L'IMPLÉMENTATION.
+        JobShopSolution base = FullDataGenerator.generate(ORDERS, SEED);
+        FullScoreCalculator before = new FullScoreCalculator();
+        before.resetWorkingSolution(base);
+
+        Operation target = firstOnItsMachineWithNoChainPredecessor(base, before);
+        int targetId = (int) target.getId();
+        int machineId = (int) target.getMachineId();
+        long coldStart = base.getSetupMatrix().coldStartSeconds(target.getSetupKey());
+
+        // La revendication tient la machine depuis l'origine, et laisse montré L'ARTICLE MÊME que
+        // l'opération demande.
+        long claimFrom = base.getOriginEpochSec();
+        long claimTo = before.setupEndOf(targetId) + 30L * 24 * 3600L;
+        JobShopSolution withClaim =
+                withMachineClaim(machineId, claimFrom, claimTo, target.getSetupKey());
+        FullScoreCalculator after = new FullScoreCalculator();
+        after.resetWorkingSolution(withClaim);
+
+        assertEquals(claimTo, after.setupStartOf(targetId),
+                "l'opération doit reprendre la machine à l'instant EXACT où la revendication la "
+                        + "rend");
+        assertEquals(after.setupStartOf(targetId), after.setupEndOf(targetId),
+                "l'article de la revendication est celui que l'opération demande : la mise en "
+                        + "train doit valoir ZÉRO seconde. Sans la clé venue de la revendication, "
+                        + "cette machine serait vue FROIDE et paierait " + coldStart
+                        + " s de démarrage — observé " + (after.setupEndOf(targetId)
+                                - after.setupStartOf(targetId)) + " s de temps mur");
+        assertEquals(0L, after.resourceCentsOf(targetId),
+                "mise en train nulle ET machine reprise à l'instant où la revendication la rend : "
+                        + "le coût de ressource doit être EXACTEMENT nul. Un reste non nul est "
+                        + "une immobilisation fantôme — la machine facturée à l'arrêt pendant que "
+                        + "la revendication l'usinait");
+    }
+
+    @Test
+    void aClaimThatPushesNothingIsStillTheLastOccupantOfTheMachine() {
+        // Le dernier occupant N'EST PAS « la revendication franchie ». Une revendication peut se
+        // terminer AVANT que l'opération ne démarre — parce que le metteur, lui, n'est libre que
+        // plus tard — sans rien pousser du tout. C'est pourtant SON article qui est sur la broche.
+        //
+        // C'est le seul cas qui sépare la règle implémentée de sa formulation étroite, et c'est là
+        // qu'un `>` glissé en `>=` se cacherait.
+        JobShopSolution base = FullDataGenerator.generate(ORDERS, SEED);
+        FullScoreCalculator before = new FullScoreCalculator();
+        before.resetWorkingSolution(base);
+
+        Operation target = firstOnItsMachineWithNoChainPredecessor(base, before);
+        int targetId = (int) target.getId();
+        int machineId = (int) target.getMachineId();
+        int setterId = (int) target.getSetter().getId();
+        long coldStart = base.getSetupMatrix().coldStartSeconds(target.getSetupKey());
+
+        // Le metteur est retenu trente jours : c'est LUI qui commande la date de départ.
+        long setterTo = base.getOriginEpochSec() + 30L * 24 * 3600L;
+        // La revendication machine, elle, rend la broche BIEN AVANT — elle ne pousse rien.
+        long machineTo = base.getOriginEpochSec() + 10L * 24 * 3600L;
+
+        JobShopSolution withBoth = withClaims(
+                new ResourceClaim(-1L, machineId, ResourceClaim.NONE, ResourceClaim.NONE,
+                        target.getSetupKey(), base.getOriginEpochSec(), machineTo, 0L, 0L, 0L, 0L),
+                new ResourceClaim(-2L, ResourceClaim.NONE, setterId, ResourceClaim.NONE, 0,
+                        0L, 0L, base.getOriginEpochSec(), setterTo, 0L, 0L));
+        FullScoreCalculator after = new FullScoreCalculator();
+        after.resetWorkingSolution(withBoth);
+
+        assertTrue(after.setupStartOf(targetId) >= setterTo,
+                "c'est le metteur qui commande la date : mise en train à "
+                        + after.setupStartOf(targetId) + ", metteur libéré à " + setterTo);
+        assertEquals(after.setupStartOf(targetId), after.setupEndOf(targetId),
+                "la revendication machine ne pousse RIEN — elle rend la broche dix jours avant — "
+                        + "mais elle reste le DERNIER OCCUPANT, et son article est celui que "
+                        + "l'opération demande : la mise en train doit valoir zéro. Une règle "
+                        + "limitée aux revendications FRANCHIES facturerait ici " + coldStart
+                        + " s de démarrage à froid");
+    }
+
+    @Test
+    void bothPassesAgreeWhenTheClaimAlsoCarriesTheSetupKey() {
+        // Le même contrôle différentiel que ci-dessus, mais sur le cas où la butée touche AUSSI la
+        // clé de mise en train. Les deux passes portent la formule en DOUBLE — c'est ce qui fait
+        // du balayage à froid un oracle indépendant, et c'est aussi ce qui les laisse diverger si
+        // une seule des deux apprend la règle. Rien d'autre ne le dirait.
+        JobShopSolution base = FullDataGenerator.generate(ORDERS, SEED);
+        FullScoreCalculator before = new FullScoreCalculator();
+        before.resetWorkingSolution(base);
+
+        Operation target = firstOnItsMachineWithNoChainPredecessor(base, before);
+        int machineId = (int) target.getMachineId();
+        long claimTo = before.setupEndOf((int) target.getId()) + 30L * 24 * 3600L;
+
+        JobShopSolution withClaim = withMachineClaim(machineId, base.getOriginEpochSec(), claimTo,
+                target.getSetupKey());
+        FullScoreCalculator after = new FullScoreCalculator();
+        after.resetWorkingSolution(withClaim);
+
+        HardSoftLongScore incremental = after.calculateScore();
+        HardSoftLongScore oracle = after.fullSweepScore();
+
+        assertEquals(oracle, incremental,
+                "la clé venue de la revendication doit être vue par les DEUX passes. "
+                        + "incrémental=" + incremental + " oracle=" + oracle + " écart_souple="
+                        + (incremental.softScore() - oracle.softScore()));
+    }
+
+    @Test
+    void thePassesStayInAgreementUnderMOVESAndNotOnlyAtReset() {
+        // Les contrôles différentiels précédents comparent les deux passes SUR UN RESET. Ils ne
+        // disent rien de la propagation : un nœud sali et oublié après un mouvement laisserait la
+        // butée juste au départ et fausse dès le premier échange. C'est cette moitié-là que le
+        // moteur exercera réellement.
+        //
+        // Les quatre familles de prédécesseurs sont sollicitées — séquence, machine, metteur,
+        // outillage — parce qu'une butée qui ne serait recalculée que sur la file machine
+        // passerait ce test avec trois branches mortes.
+        JobShopSolution solution = withMixedClaims(150, 23L);
+        FullScoreCalculator calculator = new FullScoreCalculator();
+        calculator.resetWorkingSolution(solution);
+
+        // Garde de non-vacuité : des revendications qui ne mordraient sur rien laisseraient ce
+        // test vrai pour la même raison que T1, c'est-à-dire pour rien.
+        FullScoreCalculator free = new FullScoreCalculator();
+        free.resetWorkingSolution(FullDataGenerator.generate(150, 23L));
+        assertNotEquals(free.calculateScore(), calculator.calculateScore(),
+                "les revendications ne déplacent rien sur cette instance — le test serait vacant");
+
+        List<Order> sequence = solution.getScheduleList().get(0).getOrderSequence();
+        List<Operation> operations = solution.getOperationList();
+        Random random = new Random(29L);
+
+        for (int move = 0; move < 160; move++) {
+            int kind = random.nextInt(4);
+            if (kind == 0) {
+                int a = random.nextInt(sequence.size());
+                int b = random.nextInt(sequence.size());
+                if (a == b) {
+                    continue;
+                }
+                int from = Math.min(a, b);
+                int to = Math.max(a, b) + 1;
+                calculator.beforeListVariableChanged(null, "orderSequence", from, to);
+                Collections.swap(sequence, a, b);
+                calculator.afterListVariableChanged(null, "orderSequence", from, to);
+            } else if (kind == 1) {
+                Operation op = operations.get(random.nextInt(operations.size()));
+                List<Machine> candidates = op.getCompatibleMachines();
+                calculator.reassignMachine(op, candidates.get(random.nextInt(candidates.size())));
+            } else if (kind == 2) {
+                Operation op = operations.get(random.nextInt(operations.size()));
+                List<Tooling> pool = op.getCompatibleToolings();
+                if (pool.isEmpty()) {
+                    continue;
+                }
+                calculator.reassignTooling(op, pool.get(random.nextInt(pool.size())));
+            } else {
+                Operation op = operations.get(random.nextInt(operations.size()));
+                List<Setter> competent = solution.getSetterList().stream()
+                        .filter(setter -> setter.canSetUp(op.getMachine()))
+                        .toList();
+                calculator.reassignSetter(op, competent.get(random.nextInt(competent.size())));
+            }
+            HardSoftLongScore incremental = calculator.calculateScore();
+            HardSoftLongScore oracle = calculator.fullSweepScore();
+            assertEquals(oracle, incremental, "divergence au mouvement " + move
+                    + " : incrémental=" + incremental + " oracle=" + oracle + " écart_souple="
+                    + (incremental.softScore() - oracle.softScore()));
+        }
+    }
+
+    /**
+     * La même instance avec des revendications sur les QUATRE familles de ressources.
+     *
+     * <p>
+     * Trois revendications à trois couches — la forme d'un ordre réellement lancé, qui immobilise
+     * machine, metteur et outillage à des instants différents mais liés — et quelques
+     * mono-couches, qui sont la forme d'une indisponibilité subie.
+     */
+    private static JobShopSolution withMixedClaims(int orders, long seed) {
+        JobShopSolution fresh = FullDataGenerator.generate(orders, seed);
+        long origin = fresh.getOriginEpochSec();
+        long day = 24L * 3600L;
+        List<ResourceClaim> claims = new ArrayList<>();
+        List<Operation> operations = fresh.getOperationList();
+        for (int i = 0; i < 3; i++) {
+            Operation source = operations.get(i * 37 % operations.size());
+            claims.add(new ResourceClaim(-1L - i, (int) source.getMachineId(),
+                    (int) source.getSetter().getId(),
+                    source.getTooling() == null ? ResourceClaim.NONE
+                            : (int) source.getTooling().getId(),
+                    source.getSetupKey(),
+                    origin + 5 * day, origin + (12 + i) * day,
+                    origin + 5 * day, origin + (8 + i) * day,
+                    origin + 5 * day, origin + (8 + i) * day));
+        }
+        for (int i = 3; i < 9; i++) {
+            Operation source = operations.get(i * 53 % operations.size());
+            claims.add(new ResourceClaim(-1L - i, (int) source.getMachineId(), ResourceClaim.NONE,
+                    ResourceClaim.NONE, source.getSetupKey(),
+                    origin + (20 + i) * day, origin + (26 + i) * day, 0L, 0L, 0L, 0L));
+        }
+        for (int s = 0; s < 2; s++) {
+            claims.add(new ResourceClaim(-100L - s, ResourceClaim.NONE, s, ResourceClaim.NONE, 0,
+                    0L, 0L, origin + 30 * day, origin + 34 * day, 0L, 0L));
+        }
+        return new JobShopSolution(fresh.getOrderList(), operations, fresh.getMachineList(),
+                fresh.getSetterList(), fresh.getToolingList(), fresh.getScheduleList(), claims,
+                fresh.getSetupMatrix(), origin);
     }
 
     /**

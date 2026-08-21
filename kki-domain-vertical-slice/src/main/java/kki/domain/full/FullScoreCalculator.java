@@ -84,6 +84,23 @@ public final class FullScoreCalculator
 
     private long[] setupStartAt;
     private long[] setupEndAt;
+    /**
+     * L'article laissé MONTÉ sur la machine par ce qui l'a occupée juste avant cette opération —
+     * {@code -1} si la machine était froide.
+     *
+     * <p>
+     * Ce n'est PAS « la clé du prédécesseur de file ». Une revendication occupe la machine sans
+     * passer par la file : quand elle est le dernier occupant, c'est SON article qui est sur la
+     * broche, et la remise en train se paie depuis lui. Le cas qui chiffre : une revendication
+     * dont l'article est celui de l'opération suivante rend la mise en train GRATUITE
+     * ({@code SetupMatrix.secondsBetween(k, k)}), là où un trou de calendrier facturerait un
+     * démarrage à froid d'environ neuf heures et demie.
+     *
+     * <p>
+     * Écrit par {@link #recomputeOperation}, lu par {@link #setupSecondsOf} — donc par la passe
+     * amont et par les relevés d'usage, qui tournent tous APRÈS la passe avant. `REQ-KKI-065` V4.
+     */
+    private int[] setupKeyBefore;
     private long[] opStart;
     private long[] opEnd;
     private long[] opResourceCents;
@@ -187,6 +204,12 @@ public final class FullScoreCalculator
         rank = new int[opCount];
         setupStartAt = new long[opCount];
         setupEndAt = new long[opCount];
+        setupKeyBefore = new int[opCount];
+        // -1 = machine FROIDE. Zéro est une clé de mise en train VALIDE : sans ce remplissage,
+        // toute opération non encore datée facturerait une transition depuis l'article 0 au lieu
+        // d'un démarrage à froid. Même classe de défaut que `prevOnToolingId` ci-dessous, dans ce
+        // même fichier.
+        Arrays.fill(setupKeyBefore, -1);
         opStart = new long[opCount];
         opEnd = new long[opCount];
         opResourceCents = new long[opCount];
@@ -470,7 +493,14 @@ public final class FullScoreCalculator
         // RENDU-OUTILLAGE — l'exemplaire redevient libre à la FIN DE LA MISE EN TRAIN.
         long toolingFreeAt = toolingPredecessor >= 0 ? setupEndAt[toolingPredecessor] : origin;
 
-        long setupSeconds = setupSecondsOf(opId);
+        // LA CLÉ, et non « la clé du prédécesseur » : c'est le DERNIER OCCUPANT de la machine
+        // qui laisse son article sur la broche, et une revendication en est un occupant sans
+        // passer par la file. Le prédécesseur de file n'est que le candidat de départ ; la butée
+        // ci-dessous peut le supplanter.
+        int queueKeyBefore = machinePredecessor >= 0 ? opById[machinePredecessor].getSetupKey() : -1;
+        int keyBefore = queueKeyBefore;
+        long queueFreeAt = machineFreeAt;
+        long setupSeconds = setupSecondsFor(keyBefore, opId);
 
         long setupReadyAt = Math.max(Math.max(machineFreeAt, setterFreeAt), toolingFreeAt);
         long setupEnd = setterCalendar[setterId].occupancyEnd(setupReadyAt, setupSeconds);
@@ -511,15 +541,33 @@ public final class FullScoreCalculator
         List<ResourceClaim> onTooling =
                 assignedToolingId[opId] >= 0 ? claimsOnTooling[assignedToolingId[opId]] : List.of();
         int budget = onMachine.size() + onSetter.size() + onTooling.size();
-        for (int pass = 0; pass < budget; pass++) {
-            long pushedTo = setupReadyAt;
+        boolean settled = budget == 0;
+        long machineOccupiedUntil = Long.MIN_VALUE;
+        // `budget + 1` : chaque passe qui pousse absorbe au moins une revendication — il y en a
+        // `budget` — et il en faut UNE de plus pour CONSTATER le point fixe. Sans elle, la boucle
+        // sortirait sur la dernière poussée sans jamais vérifier que plus rien ne croise.
+        for (int pass = 0; pass <= budget; pass++) {
+            // DERNIER OCCUPANT de la machine, et non « revendication franchie » : une
+            // revendication qui se termine AVANT la fenêtre ne pousse rien, mais c'est bien SON
+            // article qui reste monté. Les deux rôles se calculent d'un seul balayage — le plus
+            // tardif commande la clé, et il ne pousse que s'il dépasse `setupReadyAt`.
+            long occupiedUntil = Long.MIN_VALUE;
+            int occupantKey = -1;
             for (ResourceClaim claim : onMachine) {
                 if (claim.getMachineFromEpochSec() >= end) {
                     break; // triées par début : les suivantes commencent encore plus tard
                 }
-                pushedTo = Math.max(pushedTo, claim.getMachineToEpochSec());
+                if (claim.getMachineToEpochSec() > occupiedUntil) {
+                    occupiedUntil = claim.getMachineToEpochSec();
+                    occupantKey = claim.getSetupKey();
+                }
             }
-            long machinePushedTo = pushedTo;
+            // Retenu à CHAQUE passe, y compris celle qui conclut : une revendication qui ne
+            // pousse rien peut être le dernier occupant — elle finit après le prédécesseur mais
+            // avant que le metteur soit libre. Ne la retenir que dans la branche qui pousse
+            // facturerait à la machine une immobilisation pendant qu'elle usinait.
+            machineOccupiedUntil = Math.max(machineOccupiedUntil, occupiedUntil);
+            long pushedTo = Math.max(setupReadyAt, occupiedUntil);
             for (ResourceClaim claim : onSetter) {
                 if (claim.getSetterFromEpochSec() >= setupEnd) {
                     break;
@@ -532,20 +580,37 @@ public final class FullScoreCalculator
                 }
                 pushedTo = Math.max(pushedTo, claim.getToolingToEpochSec());
             }
-            if (pushedTo == setupReadyAt) {
+            // `>` et non `>=` : à fin égale, le prédécesseur de file l'emporte. Deux occupants
+            // qui finissent au même instant sont une faute d'ingestion — la garde qui la nomme
+            // est ailleurs, et ce n'est pas ici qu'il faut la deviner.
+            int nextKey = occupiedUntil > queueFreeAt ? occupantKey : queueKeyBefore;
+            if (pushedTo == setupReadyAt && nextKey == keyBefore) {
+                settled = true;
                 break;
             }
             setupReadyAt = pushedTo;
-            // Seule la butée MACHINE libère la machine plus tard : une revendication de metteur ou
-            // d'outillage ne l'occupe pas, elle la fait attendre — et cette attente-là est bien de
-            // l'immobilisation à facturer.
-            machineFreeAt = Math.max(machineFreeAt, machinePushedTo);
+            keyBefore = nextKey;
+            setupSeconds = setupSecondsFor(keyBefore, opId);
             setupEnd = setterCalendar[setterId].occupancyEnd(setupReadyAt, setupSeconds);
             start = Math.max(setupEnd, chainReadyAt);
             end = machineCalendar[machineId].occupancyEnd(start, op.getDurationSeconds());
         }
+        // GUI-PRO-118 — une précondition ne reste pas une consigne. Sortir par épuisement du
+        // budget plutôt que par le point fixe rendrait une réponse SILENCIEUSEMENT tronquée :
+        // exactement la classe de défaut que cette exigence existe pour supprimer.
+        if (!settled) {
+            throw new IllegalStateException("butée non convergée après " + budget
+                    + " passes sur l'opération " + opId + " — M" + machineId + " S" + setterId
+                    + " T" + assignedToolingId[opId] + ", mise en train à " + setupReadyAt);
+        }
+
+        // Seule la butée MACHINE libère la machine plus tard : une revendication de metteur ou
+        // d'outillage ne l'OCCUPE pas, elle la fait ATTENDRE — et cette attente-là est bien de
+        // l'immobilisation à facturer.
+        machineFreeAt = Math.max(queueFreeAt, machineOccupiedUntil);
 
         long machineIdle = setupEnd - machineFreeAt - setupSeconds;
+        setupKeyBefore[opId] = keyBefore;
 
         long resourceCents =
                 CostModel.resourceCents(setupSeconds, machineIdle, machineHourlyCents[machineId]);
@@ -604,15 +669,28 @@ public final class FullScoreCalculator
         return byLayer;
     }
 
-    private long setupSecondsOf(int opId) {
-        int machinePredecessor = prevOnMachineId[opId];
+    /**
+     * La mise en train à payer pour amener la machine de l'article {@code keyBefore} à celui de
+     * {@code opId} — {@code keyBefore < 0} valant machine FROIDE.
+     *
+     * <p>
+     * UNE seule définition du côté incrémental (`GUI-PRO-013`), pour deux entrées : celle de
+     * {@link #recomputeOperation}, qui connaît la clé avant de l'avoir rangée, et
+     * {@link #setupSecondsOf}, qui la relit. {@link #coldSweep} en porte volontairement une
+     * SECONDE, écrite à part : c'est ce qui en fait un oracle indépendant, et leur accord est
+     * vérifié par test plutôt que garanti par construction.
+     */
+    private long setupSecondsFor(int keyBefore, int opId) {
         // La technologie du POSTE entre dans le calcul : la préparation n'est pas la même sur
         // un tour automatique et sur une rectifieuse.
         int technology = opById[opId].getMachine().getTechnology();
-        return machinePredecessor >= 0
-                ? setupMatrix.secondsBetween(opById[machinePredecessor].getSetupKey(),
-                        opById[opId].getSetupKey(), technology)
+        return keyBefore >= 0
+                ? setupMatrix.secondsBetween(keyBefore, opById[opId].getSetupKey(), technology)
                 : setupMatrix.coldStartSeconds(opById[opId].getSetupKey());
+    }
+
+    private long setupSecondsOf(int opId) {
+        return setupSecondsFor(setupKeyBefore[opId], opId);
     }
 
     private void recomputeOrderCost(Order order, boolean track) {
@@ -695,9 +773,10 @@ public final class FullScoreCalculator
                 Operation op = opById[opId];
                 int m = (int) op.getMachineId();
                 int s = (int) op.getSetter().getId();
-                long setupSeconds = lastKeyOnMachine[m] < 0
+                int keyBefore = lastKeyOnMachine[m];
+                long setupSeconds = keyBefore < 0
                         ? setupMatrix.coldStartSeconds(op.getSetupKey())
-                        : setupMatrix.secondsBetween(lastKeyOnMachine[m], op.getSetupKey(),
+                        : setupMatrix.secondsBetween(keyBefore, op.getSetupKey(),
                                 op.getMachine().getTechnology());
                 int t = op.getTooling() == null ? -1 : (int) op.getTooling().getId();
                 long withoutTooling = Math.max(machineFree[m], setterFree[s]);
@@ -707,14 +786,79 @@ public final class FullScoreCalculator
                     // TAUX DE LIAISON — l'outillage retient-il vraiment, ou la contrainte est-elle
                     // décorative ? Un pool jamais liant rendrait la 4e famille indiscernable d'une
                     // absence de famille, et le test différentiel ne pourrait pas le voir.
+                    //
+                    // ⚠️ Mesuré AVANT la butée, et pas après : il compte ce que le POOL retient.
+                    // Le compter après ferait entrer les revendications dans le taux et changerait
+                    // silencieusement le sens de la mesure au milieu des campagnes.
                     if (toolingFree[t] > withoutTooling) {
                         bound++;
                     }
                 }
                 long setupEnd = setterCalendar[s].occupancyEnd(setupReadyAt, setupSeconds);
-                long machineIdle = setupEnd - machineFree[m] - setupSeconds;
                 long finish = machineCalendar[m]
                         .occupancyEnd(Math.max(setupEnd, chainReadyAt), op.getDurationSeconds());
+
+                // ── BUTÉE (DEC-KKI-013) — la MÊME règle que la passe incrémentale, écrite à
+                // part. Cette duplication est VOULUE : c'est elle qui fait de ce balayage un
+                // oracle indépendant, et leur accord se vérifie par test plutôt que de se
+                // garantir par construction. Réserve n° 6 de l'audit, portée et non tue.
+                List<ResourceClaim> onMachine = claimsOnMachine[m];
+                List<ResourceClaim> onSetter = claimsOnSetter[s];
+                List<ResourceClaim> onTooling = t >= 0 ? claimsOnTooling[t] : List.<ResourceClaim>of();
+                long machineOccupiedUntil = Long.MIN_VALUE;
+                int budget = onMachine.size() + onSetter.size() + onTooling.size();
+                boolean settled = budget == 0;
+                for (int pass = 0; pass <= budget; pass++) {
+                    long occupiedUntil = Long.MIN_VALUE;
+                    int occupantKey = -1;
+                    for (ResourceClaim claim : onMachine) {
+                        if (claim.getMachineFromEpochSec() >= finish) {
+                            break;
+                        }
+                        if (claim.getMachineToEpochSec() > occupiedUntil) {
+                            occupiedUntil = claim.getMachineToEpochSec();
+                            occupantKey = claim.getSetupKey();
+                        }
+                    }
+                    machineOccupiedUntil = Math.max(machineOccupiedUntil, occupiedUntil);
+                    long pushedTo = Math.max(setupReadyAt, occupiedUntil);
+                    for (ResourceClaim claim : onSetter) {
+                        if (claim.getSetterFromEpochSec() >= setupEnd) {
+                            break;
+                        }
+                        pushedTo = Math.max(pushedTo, claim.getSetterToEpochSec());
+                    }
+                    for (ResourceClaim claim : onTooling) {
+                        if (claim.getToolingFromEpochSec() >= setupEnd) {
+                            break;
+                        }
+                        pushedTo = Math.max(pushedTo, claim.getToolingToEpochSec());
+                    }
+                    int nextKey = occupiedUntil > machineFree[m] ? occupantKey
+                            : lastKeyOnMachine[m];
+                    if (pushedTo == setupReadyAt && nextKey == keyBefore) {
+                        settled = true;
+                        break;
+                    }
+                    setupReadyAt = pushedTo;
+                    keyBefore = nextKey;
+                    setupSeconds = keyBefore < 0
+                            ? setupMatrix.coldStartSeconds(op.getSetupKey())
+                            : setupMatrix.secondsBetween(keyBefore, op.getSetupKey(),
+                                    op.getMachine().getTechnology());
+                    setupEnd = setterCalendar[s].occupancyEnd(setupReadyAt, setupSeconds);
+                    finish = machineCalendar[m].occupancyEnd(Math.max(setupEnd, chainReadyAt),
+                            op.getDurationSeconds());
+                }
+                if (!settled) {
+                    throw new IllegalStateException("butée non convergée après " + budget
+                            + " passes sur l'opération " + opId + " (balayage à froid)");
+                }
+
+                // Une revendication de metteur ou d'outillage fait ATTENDRE la machine sans
+                // l'occuper : l'attente reste facturée. Seule la butée MACHINE la libère plus tard.
+                long machineFreeAt = Math.max(machineFree[m], machineOccupiedUntil);
+                long machineIdle = setupEnd - machineFreeAt - setupSeconds;
 
                 long setterCost = setupSeconds * CostModel.SETTER_CENTS_PER_HOUR / 3600L;
                 long idleCost = machineIdle * machineHourlyCents[m] / 3600L;
@@ -732,6 +876,7 @@ public final class FullScoreCalculator
                 }
                 lastKeyOnMachine[m] = op.getSetupKey();
                 chainReadyAt = finish;
+
             }
             completions[(int) order.getId()] = chainReadyAt;
             long total = CostModel.orderCents(order, chainReadyAt);
@@ -1549,6 +1694,19 @@ public final class FullScoreCalculator
 
     long startOf(int opId) {
         return opStart[opId];
+    }
+
+    /**
+     * Le coût de RESSOURCE imputé à cette opération — metteur en train plus machine immobilisée.
+     *
+     * <p>
+     * C'est le seul chiffre qui rend visibles d'un coup les deux termes que la butée déplace :
+     * une mise en train nulle et une immobilisation nulle donnent ZÉRO, et rien d'autre ne donne
+     * zéro. Une immobilisation fantôme — la machine facturée à l'arrêt pendant qu'une
+     * revendication l'usinait — s'y lit immédiatement.
+     */
+    long resourceCentsOf(int opId) {
+        return opResourceCents[opId];
     }
 
     long endOf(int opId) {
