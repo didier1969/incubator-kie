@@ -126,10 +126,22 @@ public class PlannerTestUtils {
 
     public static <Solution_> InnerScoreDirector<Solution_, SimpleScore> mockScoreDirector(
             SolutionDescriptor<Solution_> solutionDescriptor) {
+        return mockScoreDirector(solutionDescriptor, false);
+    }
+
+    /**
+     * REQ-KKI-047 — variante armant le registre d'équilibre des notifications de variable.
+     *
+     * @param assertVariableNotificationBalance vrai pour qu'un before sans son after fasse lever
+     *        le directeur à la frontière du pas suivant
+     */
+    public static <Solution_> InnerScoreDirector<Solution_, SimpleScore> mockScoreDirector(
+            SolutionDescriptor<Solution_> solutionDescriptor, boolean assertVariableNotificationBalance) {
         EasyScoreDirectorFactory<Solution_, SimpleScore> scoreDirectorFactory =
                 new EasyScoreDirectorFactory<>(solutionDescriptor, (solution_) -> SimpleScore.of(0));
         scoreDirectorFactory.setInitializingScoreTrend(
                 InitializingScoreTrend.buildUniformTrend(InitializingScoreTrendLevel.ONLY_DOWN, 1));
+        scoreDirectorFactory.setAssertVariableNotificationBalance(assertVariableNotificationBalance);
         return mock(InnerScoreDirector.class,
                 AdditionalAnswers.delegatesTo(scoreDirectorFactory.buildScoreDirector(false, false)));
     }

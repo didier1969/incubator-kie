@@ -1,4 +1,4 @@
-package kki.domain.engine;
+package org.optaplanner.core.impl.domain.solution.descriptor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -14,7 +14,6 @@ import org.optaplanner.core.api.domain.valuerange.ValueRangeProvider;
 import org.optaplanner.core.api.domain.variable.PlanningListVariable;
 import org.optaplanner.core.api.domain.variable.PlanningVariable;
 import org.optaplanner.core.api.score.buildin.hardsoftlong.HardSoftLongScore;
-import org.optaplanner.core.impl.domain.solution.descriptor.SolutionDescriptor;
 
 /**
  * Le fondement de DEC-KKI-004, mis à l'épreuve — REQ-KKI-034.
@@ -30,7 +29,13 @@ import org.optaplanner.core.impl.domain.solution.descriptor.SolutionDescriptor;
  * Une décision d'architecture assise sur une limite du moteur doit pouvoir se relire sur une
  * exécution, pas sur un souvenir. Ce test est cette exécution.
  */
-class MixedEntityClassesTest {
+/**
+ * Publique parce que son modèle de domaine imbriqué est RÉUTILISÉ par
+ * {@code GenericListSelectorOnMixedModelTest}, qui vit dans le paquet du sélecteur.
+ * Chacun des deux tests reste ainsi dans le paquet de son sujet — le descripteur ici,
+ * la fabrique de sélecteur là-bas — au lieu d'être co-localisés par accident.
+ */
+public class MixedEntityClassesTest {
 
     @Test
     void twoEntityClassesWithDifferentVariableKindsCountTheirInitializationCorrectly() {

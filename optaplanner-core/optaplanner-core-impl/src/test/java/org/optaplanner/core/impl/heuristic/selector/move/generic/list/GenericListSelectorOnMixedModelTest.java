@@ -1,4 +1,4 @@
-package kki.domain.engine;
+package org.optaplanner.core.impl.heuristic.selector.move.generic.list;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -15,6 +15,7 @@ import org.optaplanner.core.config.phase.PhaseConfig;
 import org.optaplanner.core.config.score.director.ScoreDirectorFactoryConfig;
 import org.optaplanner.core.config.solver.SolverConfig;
 import org.optaplanner.core.config.solver.termination.TerminationConfig;
+import org.optaplanner.core.impl.domain.solution.descriptor.MixedEntityClassesTest;
 
 /**
  * Les sélecteurs GÉNÉRIQUES de liste sur un modèle à deux classes d'entité — REQ-KKI-040.
