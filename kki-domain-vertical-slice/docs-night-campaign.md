@@ -162,20 +162,45 @@ coûts finaux, publiée dans la même police que les chiffres. Il est faux. Les 
 | LAHC-5 sur une seule graine | **levée** — graine 7 : ×1,88 contre LAHC-400 |
 | part 0,8 sur une seule graine | **levée, et l'énoncé corrigé** — 0,8 n'est l'optimum que de Hill Climbing ; LAHC-5 veut 1,00 |
 | volet D à deux points sur une graine | **levée** — graine 7 : −19,4 % |
-| « bruit inter-graines ±3 % » | **jamais mesuré** — `REQ-KKI-052`, campagne en cours |
+| « bruit inter-graines ±3 % » | **MESURÉ** — plancher en temps mur : amplitude **8,43 %**, écart-type 3,01 % sur 5 runs identiques. Le « ±3 % » était optimiste. En budget de TRAVAIL : **0,00 %** |
 | 12/12 runs complets, stderr propres | tient |
-| `swaps = 0` sur les volets A, C et D | **découvert après coup** — `REQ-KKI-055`, campagne en cours |
+| `swaps = 0` sur les volets A, C et D | **confirmé, et sa conséquence mesurée** — `REQ-KKI-055`, verdict **H2** |
+
+## Ce que le plancher de bruit fait tomber dans CE rapport
+
+Comparer deux runs uniques revient à différencier deux tirages : l'écart-type de la différence vaut
+`3,01 % × √2 = 4,26 %`, soit un seuil d'interprétabilité à 2σ de **8,5 %**. Sur les treize
+comparaisons publiées ici, **quatre tombent** :
+
+| comparaison | écart | |
+|---|---|---|
+| LAHC-50 vs HILL — les rangs 2 et 3 du volet A | −1,7 % | non séparés |
+| 4 fils vs 1 fil | −4,6 % | non séparés |
+| 8 fils vs 1 fil | +6,9 % | non séparés |
+| HILL part 0,8 vs 1,0, graine 7 | −7,5 % | non séparés |
+
+**Le volet C tombe en entier** : ni le point de rendement décroissant « entre 1 et 4 », ni la
+dégradation à 8 fils ne sont établis. Ce qui survit est ce qui comptait — ×5,7 de débit ne produit
+aucun effet mesurable, là où réduire le coût d'UNE propagation a rendu −22,7 %.
+
+Et le budget en TRAVAIL, lui, a un plancher **exactement nul** : cinq runs identiques rendent le
+même coût au CHF près pendant que le débit varie de 17 %. Sur cet axe il n'y a rien à soustraire —
+tout écart est réel. C'est une propriété du moteur, pas du banc : `scoreCalculationCountLimit` +
+`REPRODUCIBLE` rend une comparaison **bit-reproductible** quelle que soit la machine.
 
 ## Suite
 
-1. **`scripts/bench-noise.sh`** — le plancher de bruit, précondition de tout ce qui suit. Sans lui,
-   un écart se lit contre un « ±3 % » qui n'a jamais été mesuré. Relevé au budget qu'il arbitre.
-2. **`scripts/bench-seq.sh`** — l'extrémité `part = 0,00`, en DEUX lots : temps mur pour l'axe
-   produit (`DEC-KKI-005`), travail égal pour l'axe moteur (`REQ-KKI-052`). Seul le lot en travail
-   sépare H1 — le prix de propagation évince l'échange — de H2 — l'opérateur est faible. Grille de
-   lecture pré-enregistrée, imprimée par le rapport lui-même.
-3. Selon le verdict : rendre un changement de séquence moins cher (voie `REQ-KKI-043`), **ou**
-   écrire un opérateur de séquence à grain plus fin — `ListChangeMove` et `SubListChangeMove` sont
-   tous deux présents en amont depuis `REQ-KKI-040`, et nous n'avons ni l'un ni l'autre.
-4. Refaire la courbe coût-vs-fils (volet C) et les deux bras du volet D **sur un voisinage complet**,
-   une fois l'opérateur de séquence tranché.
+Les deux campagnes que cette section prescrivait ont été **exécutées le 2026-08-21** ; ce qu'elles
+ont rendu est repris ci-dessus et dans `REQ-KKI-052` / `REQ-KKI-055`. Ne reste que ce qui suit.
+
+1. **Le verdict est H2** — l'opérateur de séquence est intrinsèquement **×6,3 à ×6,6 pire** que la
+   réaffectation, prix de propagation neutralisé (deux graines, plancher nul). Le prix n'ajoute
+   qu'un facteur 1,8 à 2,1 : les deux hypothèses étaient vraies, H2 domine d'un facteur 3.
+2. **Correctif commandé** : un opérateur de séquence à grain plus fin. `ListChangeMove` et
+   `SubListChangeMove` sont présents en amont depuis `REQ-KKI-040` — mais **`ListChangeMove` non
+   borné réindexe ~1 667 ordres au lieu de 2**, donc sa défaite ressemblerait à une confirmation
+   de H2 sans rien mesurer d'autre que la plomberie. Borner d'abord (`REQ-KKI-061`).
+3. **Prérequis** : la **butée** (`DEC-KKI-013`, `REQ-KKI-065`) — le catalogue amont ne consulte
+   aucun verrou, donc l'adopter avant elle casserait le gel des ordres lancés, en silence.
+4. Refaire la courbe coût-vs-fils (volet C) et les deux bras du volet D **sur un voisinage
+   complet**, une fois l'opérateur de séquence tranché.
